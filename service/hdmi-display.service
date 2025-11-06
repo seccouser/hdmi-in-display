@@ -1,0 +1,1 @@
+[Unit]\nDescription=HDMI Display Service\n[Service]\nExecStart=/usr/bin/somecommand\n[Install]\nWantedBy=multi-user.target\n
