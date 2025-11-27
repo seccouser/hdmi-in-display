@@ -19,13 +19,9 @@
 #include <SDL2/SDL_opengl.h>
 #include <sys/stat.h>
 #include <limits.h>
-#include <string>
-#include <vector>
-#include <fstream>
-#include <sys/stat.h>
-#include <limits.h>
-#include <unistd.h>
-#include <iostream>
+#include <sstream>
+#include <array>
+#include <cctype>
 
 #define DEVICE "/dev/video0"
 #define DEFAULT_WIDTH 1920
@@ -167,9 +163,8 @@ void print_usage(const char* prog) {
               << "  -h, --help                 show this help\n";
 }
 
-// --- New helpers: getExecutableDir(), fileExists(), findShaderFile() ---
+// --- Helpers: getExecutableDir(), fileExists(), findShaderFile() ---
 static std::string getExecutableDir() {
-    // Try SDL_GetBasePath() first (portable)
     char* base = SDL_GetBasePath();
     if (base) {
         std::string dir(base);
@@ -177,8 +172,6 @@ static std::string getExecutableDir() {
         if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir.push_back('/');
         return dir;
     }
-
-    // Fallback: try /proc/self/exe (Linux)
 #if defined(__linux__)
     char buf[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -189,8 +182,6 @@ static std::string getExecutableDir() {
         if (pos != std::string::npos) return path.substr(0, pos + 1);
     }
 #endif
-
-    // Last resort: current directory
     return std::string("./");
 }
 
@@ -201,43 +192,76 @@ static bool fileExists(const std::string &path) {
 
 static std::string findShaderFile(const std::string &name, std::vector<std::string>* outAttempts = nullptr) {
     if (name.empty()) return std::string();
-
     std::vector<std::string> candidates;
-
-    // direct name (cwd)
     candidates.push_back(name);
-
-    // executable dir + name and some relatives
     std::string exeDir = getExecutableDir();
     if (!exeDir.empty()) {
         candidates.push_back(exeDir + name);
         candidates.push_back(exeDir + "shaders/" + name);
-        candidates.push_back(exeDir + "../" + name);           // parent of exe dir
-        candidates.push_back(exeDir + "../shaders/" + name);   // parent/shaders
-        candidates.push_back(exeDir + "../../shaders/" + name);// two levels up (useful for build/source layouts)
-        candidates.push_back(exeDir + "assets/" + name);       // possible assets folder
+        candidates.push_back(exeDir + "../" + name);
+        candidates.push_back(exeDir + "../shaders/" + name);
+        candidates.push_back(exeDir + "../../shaders/" + name);
+        candidates.push_back(exeDir + "assets/" + name);
     }
-
-    // local shaders folder relative to cwd
     candidates.push_back(std::string("shaders/") + name);
-
-    // common system-wide locations (optional)
     candidates.push_back(std::string("/usr/local/share/hdmi-in-display/shaders/") + name);
     candidates.push_back(std::string("/usr/share/hdmi-in-display/shaders/") + name);
 
-    // record attempts if requested
     if (outAttempts) {
         outAttempts->clear();
         outAttempts->reserve(candidates.size());
     }
-
     for (const auto &p : candidates) {
         if (outAttempts) outAttempts->push_back(p);
         if (fileExists(p)) return p;
     }
     return std::string();
 }
-// --- end helpers ---
+
+// --- Helpers for loading module offset files ---
+static std::string joinPath(const std::string &dir, const std::string &name) {
+    if (dir.empty()) return name;
+    if (dir.back() == '/' || dir.back() == '\\') return dir + name;
+    return dir + "/" + name;
+}
+
+static bool parseXYLine(const std::string &line, int &x, int &y) {
+    size_t a = line.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return false;
+    size_t b = line.find_last_not_of(" \t\r\n");
+    std::string s = line.substr(a, b - a + 1);
+    if (s.empty()) return false;
+    if (s[0] == '#') return false;
+    std::istringstream iss(s);
+    if (!(iss >> x >> y)) return false;
+    return true;
+}
+
+// names: {"modul1.txt","modul2.txt","modul3.txt"}
+// out: vector<GLint> of size 150*2 (x0,y0,x1,y1,...)
+static bool loadOffsetsFromModuleFiles(const std::array<std::string,3> &names, std::vector<GLint> &out) {
+    out.assign(150 * 2, 0);
+    size_t fillIndex = 0;
+    std::string exeDir = getExecutableDir();
+    for (size_t m = 0; m < names.size(); ++m) {
+        std::string candidates[2] = { joinPath(exeDir, names[m]), names[m] };
+        for (int c = 0; c < 2; ++c) {
+            const std::string &path = candidates[c];
+            if (!fileExists(path)) continue;
+            std::ifstream f(path);
+            if (!f.is_open()) continue;
+            std::string line;
+            while (std::getline(f, line) && fillIndex < out.size()) {
+                int x,y;
+                if (!parseXYLine(line, x, y)) continue;
+                out[fillIndex++] = (GLint)x;
+                out[fillIndex++] = (GLint)y;
+            }
+            break;
+        }
+    }
+    return true;
+}
 
 int main(int argc, char** argv) {
   static struct option longopts[] = {
@@ -250,7 +274,6 @@ int main(int argc, char** argv) {
     {0,0,0,0}
   };
 
-  // parse CLI options
   for (;;) {
     int idx = 0;
     int c = getopt_long(argc, argv, "h", longopts, &idx);
@@ -291,14 +314,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Initial format detection
   uint32_t cur_width = DEFAULT_WIDTH, cur_height = DEFAULT_HEIGHT, cur_pixfmt = 0;
   if (!get_v4l2_format(fd, cur_width, cur_height, cur_pixfmt)) {
     cur_width = DEFAULT_WIDTH;
     cur_height = DEFAULT_HEIGHT;
   }
 
-  // Try to request NV24 initially (may be rejected)
   v4l2_format fmt;
   memset(&fmt, 0, sizeof(fmt));
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -310,10 +331,8 @@ int main(int argc, char** argv) {
   if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
     std::cerr << "VIDIOC_S_FMT: " << strerror(errno) << " (" << errno << ")\n";
   }
-  // re-read actual
   get_v4l2_format(fd, cur_width, cur_height, cur_pixfmt);
 
-  // Subscribe to V4L2 source change events (optional; ignore failure)
   v4l2_event_subscription sub;
   memset(&sub, 0, sizeof(sub));
   sub.type = V4L2_EVENT_SOURCE_CHANGE;
@@ -321,7 +340,6 @@ int main(int argc, char** argv) {
     // not fatal
   }
 
-  // Request buffers (MMAP)
   v4l2_requestbuffers req;
   memset(&req, 0, sizeof(req));
   req.count = BUF_COUNT;
@@ -374,7 +392,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Init SDL + GL
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
     close(fd);
@@ -406,20 +423,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Query maximum supported texture size (used by tiled uploads)
   GLint gl_max_tex = 0;
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_max_tex);
 
-  // Start in fullscreen (desktop) immediately
   if (SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
-    // ignore failure to set fullscreen
+    // ignore failure
   }
+  bool is_fullscreen = (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+
   int win_w = 0, win_h = 0;
   SDL_GetWindowSize(win, &win_w, &win_h);
   glViewport(0, 0, win_w, win_h);
 
-  // ----- Shaders and geometry -----
-  // Resolve shader paths robustly so launching from other working directories still finds them
   {
     std::vector<std::string> attempts;
     std::string vertPath = findShaderFile("shader.vert.glsl", &attempts);
@@ -440,7 +455,6 @@ int main(int argc, char** argv) {
     }
 
     GLuint program = createShaderProgram(vertPath.c_str(), fragPath.c_str());
-
     glUseProgram(program);
 
     float verts[] = {
@@ -448,7 +462,7 @@ int main(int argc, char** argv) {
        1, -1,     1, 0,
       -1,  1,     0, 1,
        1,  1,     1, 1,
-  };
+    };
     GLuint vbo = 0, vao = 0;
     glGenBuffers(1, &vbo);
     glGenVertexArrays(1, &vao);
@@ -464,7 +478,6 @@ int main(int argc, char** argv) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    // ----- Create two textures: texY (R8) and texUV (RG8) -----
     GLuint texY = 0, texUV = 0;
     glGenTextures(1, &texY);
     glBindTexture(GL_TEXTURE_2D, texY);
@@ -480,12 +493,10 @@ int main(int argc, char** argv) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // Decide initial uv texture size based on current pixfmt
     int uv_w = (cur_pixfmt == V4L2_PIX_FMT_NV12 || cur_pixfmt == V4L2_PIX_FMT_NV21) ? (int)(cur_width/2) : (int)cur_width;
     int uv_h = (cur_pixfmt == V4L2_PIX_FMT_NV12 || cur_pixfmt == V4L2_PIX_FMT_NV21) ? (int)(cur_height/2) : (int)cur_height;
     reallocate_textures(texY, texUV, (int)cur_width, (int)cur_height, uv_w, uv_h);
 
-    // Uniforms: set sampler units and toggles
     glUseProgram(program);
     GLint loc_texY = glGetUniformLocation(program, "texY");
     GLint loc_texUV = glGetUniformLocation(program, "texUV");
@@ -497,59 +508,83 @@ int main(int argc, char** argv) {
     GLint loc_full_range = glGetUniformLocation(program, "full_range");
     GLint loc_view_mode = glGetUniformLocation(program, "view_mode");
 
+    // NEW uniform locations
+    GLint loc_offsetxy1 = glGetUniformLocation(program, "offsetxy1");
+    if (loc_offsetxy1 < 0) {
+        std::cerr << "Warning: uniform 'offsetxy1' not found (shader may optimize it out if unused)\n";
+    }
+    GLint loc_segmentIndex = glGetUniformLocation(program, "segmentIndex"); // may be -1 if shader uses const
+
+    GLint loc_rot = glGetUniformLocation(program, "rot");
+    GLint loc_flip_x = glGetUniformLocation(program, "flip_x");
+    GLint loc_flip_y = glGetUniformLocation(program, "flip_y");
+    // Log uniform locations to help debugging
+    std::cerr << "Uniform locations: uv_swap=" << loc_uv_swap
+              << " rot=" << loc_rot << " flip_x=" << loc_flip_x << " flip_y=" << loc_flip_y
+              << " offsetxy1=" << loc_offsetxy1 << " segmentIndex=" << loc_segmentIndex << "\n";
+
+    if (loc_rot < 0) {
+        std::cerr << "Note: 'rot' uniform not found (shader may optimize it out)\n";
+    }
+
     // Stable defaults for typical HDMI capture
-    int uv_swap = 0;     // default; may be auto-set below
+    int uv_swap = 0;
     if (opt_uv_swap_override >= 0) {
       uv_swap = opt_uv_swap_override;
     } else {
-      // auto detect NV12/NV21
-      if (cur_pixfmt == V4L2_PIX_FMT_NV21) {
-        uv_swap = 1;
-      } else if (cur_pixfmt == V4L2_PIX_FMT_NV12) {
-        uv_swap = 0;
-      } else {
-        uv_swap = 0; // conservative default
-      }
+      if (cur_pixfmt == V4L2_PIX_FMT_NV21) uv_swap = 1;
+      else if (cur_pixfmt == V4L2_PIX_FMT_NV12) uv_swap = 0;
+      else uv_swap = 0;
     }
-
-    // If CPU swap requested, we'll perform swap on upload and ensure shader uses uv_swap=0
-    if (opt_cpu_uv_swap) {
-      uv_swap = 0;
-    }
+    if (opt_cpu_uv_swap) uv_swap = 0;
 
     if (loc_uv_swap >= 0) glUniform1i(loc_uv_swap, uv_swap);
     if (loc_use_bt709 >= 0) glUniform1i(loc_use_bt709, opt_use_bt709);
     if (loc_full_range >= 0) glUniform1i(loc_full_range, opt_full_range);
     if (loc_view_mode >= 0) glUniform1i(loc_view_mode, 0);
 
-    // Minimal console output (no per-frame debug)
-    bool running = true;
+    // Module files and initial load
+    std::array<std::string,3> modFiles = { "modul1.txt", "modul2.txt", "modul3.txt" };
+    std::vector<GLint> offsetData;
+    if (loadOffsetsFromModuleFiles(modFiles, offsetData)) {
+        if (loc_offsetxy1 >= 0 && offsetData.size() >= 150 * 2) {
+            glUseProgram(program);
+            glUniform2iv(loc_offsetxy1, 150, offsetData.data());
+            std::cerr << "Loaded offsetxy1 from module files (initial)\n";
+        } else {
+            std::cerr << "offsetxy1 not uploaded: location invalid or data missing\n";
+        }
+    } else {
+        std::cerr << "Warning: failed to load offset module files on startup\n";
+    }
 
-    // We'll periodically check VIDIOC_G_FMT every N frames to detect changes faster, but we also use events
+    // Flip/rotation defaults (adjust if needed)
+    int flip_x = 0; // horizontal mirror default
+    int flip_y = 1; // vertical flip default
+    int rotation = 0; // 0..3 (0=0deg,1=90cw,2=180,3=270cw)
+    // Upload initial values (only if locations valid)
+    if (loc_flip_x >= 0) { glUseProgram(program); glUniform1i(loc_flip_x, flip_x); }
+    if (loc_flip_y >= 0) { glUseProgram(program); glUniform1i(loc_flip_y, flip_y); }
+    if (loc_rot >= 0)    { glUseProgram(program); glUniform1i(loc_rot, rotation); }
+
+    bool running = true;
     const uint64_t CHECK_FMT_INTERVAL = 120;
     uint64_t frame_count = 0;
-
-    // Prepare pollfd for device (we'll watch for POLLIN = frame, POLLPRI = event)
     struct pollfd pfd;
     pfd.fd = fd;
     pfd.events = POLLIN | POLLPRI;
 
-    // tmp buffers/helpers for CPU swap or fallback
-    std::vector<unsigned char> tmpUVbuf; // for CPU swap of UV when needed
-    std::vector<unsigned char> tmpFallback; // fallback for packed format
-
-    // Track fullscreen state for 'F' toggle
-    bool is_fullscreen = true;
+    std::vector<unsigned char> tmpUVbuf;
+    std::vector<unsigned char> tmpFallback;
 
     while (running) {
-      // Use poll to wait for either frame data (POLLIN) or event (POLLPRI)
-      int ret = poll(&pfd, 1, 2000); // 2s timeout
+      int ret = poll(&pfd, 1, 2000);
       if (ret < 0) {
         if (errno == EINTR) continue;
         perror("poll");
         break;
       } else if (ret == 0) {
-        // timeout, do periodic checks below
+        // timeout
       } else {
         if (pfd.revents & POLLPRI) {
           v4l2_event ev;
@@ -581,7 +616,6 @@ int main(int argc, char** argv) {
         }
       }
 
-      // Periodic format check
       if ((frame_count % CHECK_FMT_INTERVAL) == 0) {
         uint32_t new_w=0, new_h=0, new_pf=0;
         if (get_v4l2_format(fd, new_w, new_h, new_pf)) {
@@ -606,7 +640,6 @@ int main(int argc, char** argv) {
         }
       }
 
-      // Now try to dequeue a video buffer
       v4l2_buffer buf;
       v4l2_plane planes[VIDEO_MAX_PLANES];
       memset(&buf, 0, sizeof(buf));
@@ -629,7 +662,6 @@ int main(int argc, char** argv) {
       unsigned char* base = (unsigned char*)buffers[buf.index][0].addr;
       size_t bytesused0 = planes[0].bytesused;
 
-      // sizes
       size_t Y_len = (size_t)cur_width * (size_t)cur_height;
       size_t UV_len = 0;
       bool isNV12_NV21 = (cur_pixfmt == V4L2_PIX_FMT_NV12 || cur_pixfmt == V4L2_PIX_FMT_NV21);
@@ -651,7 +683,6 @@ int main(int argc, char** argv) {
         uvbase = nullptr;
       }
 
-      // Upload Y
       if (ybase) {
         if ((int)cur_width <= gl_max_tex && (int)cur_height <= gl_max_tex) {
           glActiveTexture(GL_TEXTURE0);
@@ -663,7 +694,6 @@ int main(int argc, char** argv) {
         }
       }
 
-      // Upload UV
       if (uvbase) {
         int upload_w = isNV12_NV21 ? (int)(cur_width/2) : (int)cur_width;
         int upload_h = isNV12_NV21 ? (int)(cur_height/2) : (int)cur_height;
@@ -716,7 +746,6 @@ int main(int argc, char** argv) {
           }
         }
       } else {
-        // fallback packed interleaved (Y,U,V per pixel)
         size_t need = Y_len + (size_t)cur_width * (size_t)cur_height * 2;
         if (tmpFallback.size() < need) tmpFallback.resize(need);
         unsigned char* dst = tmpFallback.data();
@@ -740,6 +769,11 @@ int main(int argc, char** argv) {
       glClear(GL_COLOR_BUFFER_BIT);
       glUseProgram(program);
 
+      // Ensure rotation/flip uniforms are uploaded every frame (avoids optimization/cache issues)
+      if (loc_rot >= 0)    glUniform1i(loc_rot, rotation);
+      if (loc_flip_x >= 0) glUniform1i(loc_flip_x, flip_x);
+      if (loc_flip_y >= 0) glUniform1i(loc_flip_y, flip_y);
+
       if (!opt_cpu_uv_swap && loc_uv_swap >= 0) glUniform1i(loc_uv_swap, uv_swap);
       if (loc_use_bt709 >= 0) glUniform1i(loc_use_bt709, opt_use_bt709);
       if (loc_full_range >= 0) glUniform1i(loc_full_range, opt_full_range);
@@ -754,13 +788,11 @@ int main(int argc, char** argv) {
 
       SDL_GL_SwapWindow(win);
 
-      // Requeue buffer
       if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
         perror("VIDIOC_QBUF (requeue)");
         break;
       }
 
-      // Events: minimal toggles
       SDL_Event e;
       while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) running = false;
@@ -768,16 +800,52 @@ int main(int argc, char** argv) {
           SDL_Keycode k = e.key.keysym.sym;
           if (k == SDLK_ESCAPE) running = false;
           else if (k == SDLK_f) {
-            // Toggle fullscreen desktop mode
-            Uint32 flags = SDL_GetWindowFlags(win);
-            if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
+            if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP) {
               SDL_SetWindowFullscreen(win, 0);
-              is_fullscreen = false;
             } else {
               SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
-              is_fullscreen = true;
             }
+            SDL_GetWindowSize(win, &win_w, &win_h);
+            glViewport(0, 0, win_w, win_h);
+          } else if (k == SDLK_k) {
+            std::vector<GLint> newOffsets;
+            if (loadOffsetsFromModuleFiles(modFiles, newOffsets)) {
+                if (loc_offsetxy1 >= 0 && newOffsets.size() >= 150*2) {
+                    glUseProgram(program);
+                    glUniform2iv(loc_offsetxy1, 150, newOffsets.data());
+                    std::cerr << "Reloaded offsetxy1 from module files (on 'k' press)\n";
+                    offsetData.swap(newOffsets);
+                } else {
+                    std::cerr << "Reload failed: loc_offsetxy1 invalid or data incomplete\n";
+                }
+            } else {
+                std::cerr << "Failed to read module files on reload\n";
+            }
+            /*
+          } else if (k == SDLK_h) {
+            flip_x = !flip_x;
+            if (loc_flip_x >= 0) {
+                glUseProgram(program);
+                glUniform1i(loc_flip_x, flip_x);
+            }
+            std::cerr << "flip_x = " << flip_x << "\n";
+          } else if (k == SDLK_v) {
+            flip_y = !flip_y;
+            if (loc_flip_y >= 0) {
+                glUseProgram(program);
+                glUniform1i(loc_flip_y, flip_y);
+            }
+            std::cerr << "flip_y = " << flip_y << "\n";
+          } else if (k == SDLK_r) {
+            rotation = (rotation + 2) & 3;
+            if (loc_rot >= 0) {
+                glUseProgram(program);
+                glUniform1i(loc_rot, rotation);
+            }
+            std::cerr << "rotation = " << rotation << " (0=0deg,1=90deg,2=180deg,3=270deg)\n";
           }
+          */
+           }
         }
       }
 
