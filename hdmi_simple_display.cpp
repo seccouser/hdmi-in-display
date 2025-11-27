@@ -218,7 +218,7 @@ static std::string findShaderFile(const std::string &name, std::vector<std::stri
     return std::string();
 }
 
-// --- Helpers for loading module offset files ---
+// --- Helpers for loading module offset files (robust, with logging) ---
 static std::string joinPath(const std::string &dir, const std::string &name) {
     if (dir.empty()) return name;
     if (dir.back() == '/' || dir.back() == '\\') return dir + name;
@@ -245,21 +245,37 @@ static bool loadOffsetsFromModuleFiles(const std::array<std::string,3> &names, s
     std::string exeDir = getExecutableDir();
     for (size_t m = 0; m < names.size(); ++m) {
         std::string candidates[2] = { joinPath(exeDir, names[m]), names[m] };
+        bool fileFound = false;
         for (int c = 0; c < 2; ++c) {
             const std::string &path = candidates[c];
-            if (!fileExists(path)) continue;
+            std::cerr << "Trying open offsets file: " << path << "\n";
+            if (!fileExists(path)) {
+                std::cerr << "  not found: " << path << "\n";
+                continue;
+            }
             std::ifstream f(path);
-            if (!f.is_open()) continue;
+            if (!f.is_open()) {
+                std::cerr << "  cannot open: " << path << "\n";
+                continue;
+            }
+            fileFound = true;
+            size_t readThisFile = 0;
             std::string line;
             while (std::getline(f, line) && fillIndex < out.size()) {
                 int x,y;
                 if (!parseXYLine(line, x, y)) continue;
                 out[fillIndex++] = (GLint)x;
                 out[fillIndex++] = (GLint)y;
+                ++readThisFile;
             }
+            std::cerr << "  read " << readThisFile << " entries from " << path << "\n";
             break;
         }
+        if (!fileFound) {
+            std::cerr << "  WARNING: module file '" << names[m] << "' not found in exeDir or cwd; filling with 0s for these slots\n";
+        }
     }
+    std::cerr << "Total entries filled: " << (fillIndex/2) << " (out of 150)\n";
     return true;
 }
 
@@ -518,14 +534,15 @@ int main(int argc, char** argv) {
     GLint loc_rot = glGetUniformLocation(program, "rot");
     GLint loc_flip_x = glGetUniformLocation(program, "flip_x");
     GLint loc_flip_y = glGetUniformLocation(program, "flip_y");
+    // Gap uniforms
+    GLint loc_gap_count = glGetUniformLocation(program, "gap_count");
+    GLint loc_gap_rows = glGetUniformLocation(program, "gap_rows");
+
     // Log uniform locations to help debugging
     std::cerr << "Uniform locations: uv_swap=" << loc_uv_swap
               << " rot=" << loc_rot << " flip_x=" << loc_flip_x << " flip_y=" << loc_flip_y
+              << " gap_count=" << loc_gap_count << " gap_rows=" << loc_gap_rows
               << " offsetxy1=" << loc_offsetxy1 << " segmentIndex=" << loc_segmentIndex << "\n";
-
-    if (loc_rot < 0) {
-        std::cerr << "Note: 'rot' uniform not found (shader may optimize it out)\n";
-    }
 
     // Stable defaults for typical HDMI capture
     int uv_swap = 0;
@@ -551,6 +568,9 @@ int main(int argc, char** argv) {
             glUseProgram(program);
             glUniform2iv(loc_offsetxy1, 150, offsetData.data());
             std::cerr << "Loaded offsetxy1 from module files (initial)\n";
+            std::cerr << "offsetData[0..9]:";
+            for (size_t i = 0; i < std::min<size_t>(offsetData.size(), 10); ++i) std::cerr << " " << offsetData[i];
+            std::cerr << "\n";
         } else {
             std::cerr << "offsetxy1 not uploaded: location invalid or data missing\n";
         }
@@ -559,13 +579,20 @@ int main(int argc, char** argv) {
     }
 
     // Flip/rotation defaults (adjust if needed)
-    int flip_x = 0; // horizontal mirror default
+    int flip_x = 1; // horizontal mirror default
     int flip_y = 1; // vertical flip default
-    int rotation = 0; // 0..3 (0=0deg,1=90cw,2=180,3=270cw)
+    int rotation = 0; // 0..3 (0=0deg,1=90cw,2=180deg,3=270deg)
     // Upload initial values (only if locations valid)
     if (loc_flip_x >= 0) { glUseProgram(program); glUniform1i(loc_flip_x, flip_x); }
     if (loc_flip_y >= 0) { glUseProgram(program); glUniform1i(loc_flip_y, flip_y); }
     if (loc_rot >= 0)    { glUseProgram(program); glUniform1i(loc_rot, rotation); }
+
+    // GAP defaults: default to zero-space after row 5 and after row 10
+    const int GAP_ARRAY_SIZE = 8;
+    int gap_count = 2;
+    int gap_rows_arr[GAP_ARRAY_SIZE] = { 5, 10, 0, 0, 0, 0, 0, 0 };
+    if (loc_gap_count >= 0) { glUseProgram(program); glUniform1i(loc_gap_count, gap_count); }
+    if (loc_gap_rows >= 0)  { glUseProgram(program); glUniform1iv(loc_gap_rows, GAP_ARRAY_SIZE, gap_rows_arr); }
 
     bool running = true;
     const uint64_t CHECK_FMT_INTERVAL = 120;
@@ -774,6 +801,10 @@ int main(int argc, char** argv) {
       if (loc_flip_x >= 0) glUniform1i(loc_flip_x, flip_x);
       if (loc_flip_y >= 0) glUniform1i(loc_flip_y, flip_y);
 
+      // Ensure gap uniforms are uploaded every frame
+      if (loc_gap_count >= 0) glUniform1i(loc_gap_count, gap_count);
+      if (loc_gap_rows >= 0)  glUniform1iv(loc_gap_rows, GAP_ARRAY_SIZE, gap_rows_arr);
+
       if (!opt_cpu_uv_swap && loc_uv_swap >= 0) glUniform1i(loc_uv_swap, uv_swap);
       if (loc_use_bt709 >= 0) glUniform1i(loc_use_bt709, opt_use_bt709);
       if (loc_full_range >= 0) glUniform1i(loc_full_range, opt_full_range);
@@ -810,10 +841,13 @@ int main(int argc, char** argv) {
           } else if (k == SDLK_k) {
             std::vector<GLint> newOffsets;
             if (loadOffsetsFromModuleFiles(modFiles, newOffsets)) {
+                std::cerr << "Reload: offsetData[0..9]:";
+                for (size_t i = 0; i < std::min<size_t>(newOffsets.size(), 10); ++i) std::cerr << " " << newOffsets[i];
+                std::cerr << "\n";
                 if (loc_offsetxy1 >= 0 && newOffsets.size() >= 150*2) {
                     glUseProgram(program);
                     glUniform2iv(loc_offsetxy1, 150, newOffsets.data());
-                    std::cerr << "Reloaded offsetxy1 from module files (on 'k' press)\n";
+                    std::cerr << "Reloaded offsetxy1 from module files (on 'k' press) and uploaded to shader\n";
                     offsetData.swap(newOffsets);
                 } else {
                     std::cerr << "Reload failed: loc_offsetxy1 invalid or data incomplete\n";
@@ -821,7 +855,6 @@ int main(int argc, char** argv) {
             } else {
                 std::cerr << "Failed to read module files on reload\n";
             }
-            /*
           } else if (k == SDLK_h) {
             flip_x = !flip_x;
             if (loc_flip_x >= 0) {
@@ -837,15 +870,13 @@ int main(int argc, char** argv) {
             }
             std::cerr << "flip_y = " << flip_y << "\n";
           } else if (k == SDLK_r) {
-            rotation = (rotation + 2) & 3;
+            rotation = (rotation + 2) & 3; // step 180°
             if (loc_rot >= 0) {
                 glUseProgram(program);
                 glUniform1i(loc_rot, rotation);
             }
-            std::cerr << "rotation = " << rotation << " (0=0deg,1=90deg,2=180deg,3=270deg)\n";
+            std::cerr << "rotation = " << rotation << " (0=0deg,1=90deg,2=180deg,3=270deg) (step=180°)\n";
           }
-          */
-           }
         }
       }
 

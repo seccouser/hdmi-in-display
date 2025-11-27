@@ -34,6 +34,13 @@ uniform int rot;      // 0=0deg,1=90degcw,2=180deg,3=270degcw
 uniform int flip_x;   // 0 = normal, 1 = mirrored horizontally (input texture)
 uniform int flip_y;   // 0 = normal, 1 = mirrored vertically (input texture)
 
+// --- Gap controls ---
+// gap_count: how many entries in gap_rows are valid (<= array size)
+// gap_rows: list of row indices where the spacing AFTER that row should be treated as zero
+// Example: gap_rows = {5,10} means spacing between row 5 and 6 is treated as 0 and between 10 and 11 is 0.
+uniform int gap_count;
+uniform int gap_rows[8];
+
 // --- YUV-Parameter ---
 uniform int uv_swap;      // 0 = U in .r, V in .g ; 1 = swapped
 uniform int full_range;   // 0 = limited (video), 1 = full (pc)
@@ -61,6 +68,15 @@ vec2 rotate90_centered(vec2 uv, int k) {
     return r + c;
 }
 
+// check whether a given gap index should be treated as zero spacing
+bool isGapZero(int gapIdx) {
+    for (int i = 0; i < 8; ++i) {
+        if (i >= gap_count) break;
+        if (gap_rows[i] == gapIdx) return true;
+    }
+    return false;
+}
+
 // --- Mapping: OpenGL 3.1+; gl_FragCoord.xy integer Pixelposition im Zielbild! ---
 void main()
 {
@@ -72,63 +88,61 @@ void main()
     int segRow = segIdx / segmentsX;
     vec2 subBlockOrigin = vec2(float(segCol) * subBlockSize.x, float(segRow) * subBlockSize.y);
 
-    // --- Kachelbereich berechnen (base grid position) ---
+    // compute base tileCol/tileRow in the regular grid
     int tileCol = int((outPx.x - marginX) / (tileW + spacingX));
     int tileRow = int(outPx.y / (tileH + spacingY));
-    // If outPx is outside the regular grid bounds, early out
+
+    // quickly reject out-of-grid pixels
     if (tileCol < 0 || tileCol >= numTilesPerRow || tileRow < 0 || tileRow >= numTilesPerCol) {
         FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
+    // Compute tileStartX (X unaffected by special gaps)
     float tileStartX = marginX + float(tileCol) * (tileW + spacingX);
-    float tileStartY = float(tileRow) * (tileH + spacingY);
 
-    // Determine index into offsets array (row-major within the subblock)
-    int tileIndexWithinSubblock = tileRow * numTilesPerRow + tileCol; // 0 .. (numTilesPerRow*numTilesPerCol-1)
+    // Compute tileStartY taking into account gaps (zero spacing after certain rows)
+    float tileStartY = 0.0;
+    for (int r = 0; r < tileRow; ++r) {
+        tileStartY += tileH;
+        // gap between row r and r+1 should be 0 if gap_rows contains (r+1)
+        bool gapIsZero = isGapZero(r + 1);
+        if (!gapIsZero) tileStartY += spacingY;
+    }
+
+    // Determine index into offset array (row-major within the subblock)
+    int tileIndexWithinSubblock = tileRow * numTilesPerRow + tileCol;
     int globalIndex = clamp(tileIndexWithinSubblock, 0, 149);
     ivec2 off = offsetxy1[globalIndex];
 
-    // --- Apply offset to tile's displayed rectangle (move the tile on the output) ---
-    // Interpret off.x (GLint): positive -> shift right, negative -> left
-    //              off.y (GLint): positive -> shift down, negative -> up
+    // Apply per-tile output offset (pixel units)
     vec2 tileRectStart = vec2(tileStartX, tileStartY) + vec2(float(off.x), float(off.y));
     vec2 tileRectEnd = tileRectStart + vec2(tileW, tileH);
 
-    // --- Check if current pixel lies in the (offset) tile rectangle ---
-    bool inTile = (outPx.x >= tileRectStart.x && outPx.x < tileRectEnd.x &&
-                   outPx.y >= tileRectStart.y && outPx.y < tileRectEnd.y);
-
-    if (!inTile) {
-        // not in this tile's displayed rectangle -> black (gap)
+    // Check whether current pixel lies within the (offset) tile rectangle
+    if (!(outPx.x >= tileRectStart.x && outPx.x < tileRectEnd.x &&
+          outPx.y >= tileRectStart.y && outPx.y < tileRectEnd.y)) {
         FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    // --- Offset within the displayed tile (pixel coords, 0..tileW-1 / 0..tileH-1) ---
-    float pxInTileX = outPx.x - tileRectStart.x; // 0 .. tileW-1
-    float pxInTileY = outPx.y - tileRectStart.y; // 0 .. tileH-1
+    // Pixel inside displayed tile
+    float pxInTileX = outPx.x - tileRectStart.x;
+    float pxInTileY = outPx.y - tileRectStart.y;
 
-    // --- Compute source position in the input image that corresponds to this tile pixel ---
-    // We keep the original mapping from tileCol/tileRow to source subblock:
-    // fetchX/fetchY compute the input pixel coordinate in the full input that this tile pixel should sample.
+    // Map to source pixel (source mapping unchanged by output offsets)
     float fetchX = tileW * float(tileCol) + pxInTileX;
     float fetchY = tileH * float(tileRow) + pxInTileY;
     vec2 inputCoord = subBlockOrigin + vec2(fetchX, fetchY);
 
-    // Note: We intentionally DO NOT apply offsetxy1 to inputCoord here.
-    // The offsets only move the tile in the OUTPUT (destination), as requested.
-
-    // clamp inputCoord into valid input range (avoid sampling outside)
+    // clamp inputCoord
     inputCoord = clamp(inputCoord, vec2(0.0), fullInputSize - vec2(1.0));
 
     // --- Texturkoordinaten auf [0,1] ---
     vec2 inputUVCoord = inputCoord / fullInputSize;
 
     // --- APPLY ROTATION / FLIP to the INPUT UV before sampling ---
-    // rotate around full input center, then flip, then clamp to [0,1]
-    vec2 uvTrans = inputUVCoord;
-    uvTrans = rotate90_centered(uvTrans, rot);
+    vec2 uvTrans = rotate90_centered(inputUVCoord, rot);
     if (flip_x == 1) uvTrans.x = 1.0 - uvTrans.x;
     if (flip_y == 1) uvTrans.y = 1.0 - uvTrans.y;
     uvTrans = clamp(uvTrans, vec2(0.0), vec2(1.0));
