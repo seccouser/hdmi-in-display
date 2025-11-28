@@ -1,3 +1,7 @@
+# Global
+ocrPythonCmd = /mnt/ssd1/projects/hdmi-in-display/.venv-ocr/bin/python /mnt/ssd1/projects/hdmi-in-display/ocr_config_updater.py
+ocrRoi = 600,200,720,400
+
 # control_ini.txt - key=value pairs
 fullInputSize = 3840,2160
 segments = 3,3
@@ -18,3 +22,4 @@ inputTilesTopToBottom = 1
 modul1Serial = 1235976
 modul2Serial = 2345987
 modul3Serial = 3456123
+port = 324

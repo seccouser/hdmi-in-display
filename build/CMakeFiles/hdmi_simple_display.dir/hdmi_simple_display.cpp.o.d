@@ -341,5 +341,8 @@ CMakeFiles/hdmi_simple_display.dir/hdmi_simple_display.cpp.o: \
  /usr/include/c++/13/bits/atomic_lockfree_defines.h \
  /usr/include/c++/13/backward/auto_ptr.h \
  /usr/include/c++/13/pstl/glue_memory_defs.h /usr/include/c++/13/atomic \
+ /usr/include/c++/13/mutex /usr/include/c++/13/bits/std_mutex.h \
+ /usr/include/c++/13/bits/unique_lock.h \
+ /usr/include/c++/13/condition_variable \
  /mnt/ssd1/projects/hdmi-in-display/stb_image_write.h \
  /usr/include/assert.h

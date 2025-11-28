@@ -1,190 +1,153 @@
-# Installationsanleitung — hdmi-in-display (Armbian / Rock 5B)
+# Installation & Setup — hdmi-in-display (feature/auto-resize-v4l2)
 
-Diese Anleitung beschreibt, wie du auf einem frischen Armbian-System (z. B. Rock 5B) alle nötigen Pakete installierst, das Projekt baust, Tests ausführst und das Programm als systemd-Service laufen lässt.
+Diese Datei beschreibt Schritt‑für‑Schritt, wie du das Projekt baust, notwendige System‑ und Python‑Abhängigkeiten installierst und die neue OCR‑Integration (ocr_config_updater.py) konfigurierst. Alles ist auf Linux (Debian/Ubuntu) ausgerichtet — für andere Systeme sind die Paketnamen / Befehle entsprechend anzupassen.
 
-Hinweis: Rock 5B nutzt eine RK3588-Plattform mit Mali/GPU. Hardware-Beschleunigung (OpenGL ES / Mali-Treiber) ist auf Armbian je nach Image / Kernel unterschiedlich verfügbar. Wenn du proprietäre Mali-Treiber oder alternative OpenGL-Treiber brauchst, lies die Armbian-Dokumentation zu deinem Board/Kernel.
-
-Inhalt
-- Voraussetzungen
-- Paketinstallation (APT)
-- Benutzer-/Geräteberechtigungen
-- Repository klonen & bauen
-- Testen der V4L2-Quelle
-- Optional: systemd-Service
-- Troubleshooting / Hinweise
+Wichtig: Lies zuerst die README/PR_DESCRIPTION für Feature‑Übersicht und Hotkeys.
 
 ---
 
-## Voraussetzungen
-- Armbian (Debian/Ubuntu-basiert) installiert auf Rock 5B
-- Internetzugang zum Installieren von Paketen
-- Ein Benutzer mit sudo-Rechten (z. B. `seccouser`)
+Vorbedingungen (System)
+- Ein modernes Linux (Debian/Ubuntu getestet)
+- CMake (>= 3.10), make oder Ninja
+- Build‑Werkzeuge: gcc/clang, make
+- SDL2 dev, GLEW, OpenGL dev headers
+- V4L2 (linux kernel), Zugriff auf /dev/video* (Das Programm verwendet V4L2 MMAP capture)
 
----
-
-## Paketinstallation (empfohlen)
-Führe die folgenden Befehle als Benutzer mit sudo-Rechten aus:
-
-1) Paketlisten aktualisieren:
+Debian/Ubuntu Beispiel‑Install (root / sudo):
 ```bash
 sudo apt update
-sudo apt upgrade -y
+sudo apt install -y build-essential cmake git pkg-config \
+    libgl1-mesa-dev libglu1-mesa-dev libglew-dev libsdl2-dev \
+    libv4l-dev libx11-dev libxcb1-dev libxrandr-dev libxi-dev \
+    imagemagick   # optional, nur für ad-hoc crop/resize tests
 ```
 
-2) Grundlegende Build-Tools, Multimedia- und Grafik-Bibliotheken installieren:
+stb_image_write
+- Das Projekt verwendet die single‑header Bibliothek `stb_image_write.h`. Falls noch nicht im Repo, lade sie in den Projekt‑Root:
 ```bash
-sudo apt install -y \
-  build-essential cmake git pkg-config \
-  libv4l-dev v4l-utils \
-  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  libsdl2-dev libglew-dev libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
-  libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-  libdrm-dev libudev-dev
+curl -L -o stb_image_write.h https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
 ```
 
-Erläuterung:
-- libv4l-dev / v4l-utils: Zugriff auf V4L2-Geräte (Webcams, HDMI-Capture-Devices).
-- libav* (FFmpeg-Dev): falls das Projekt FFmpeg-Bibliotheken nutzt.
-- libsdl2-dev, libglew-dev, Mesa/EGL/GLES: für OpenGL / SDL2-Fenster und Shader.
-- libdrm/libudev: niedrige Ebene für Grafik/Device-Handling.
-
-Falls Abhängigkeiten fehlen, zeigt CMake beim Konfigurieren Fehlermeldungen — die in der Anleitung unten behandelt werden.
-
----
-
-## GPU / Treiberhinweis (Rock 5B)
-Auf Rock 5B (RK3588) wird eine Mali-GPU verwendet. Armbian kann entweder:
-- Open-source Treiber (Mesa + panfrost) verwenden, oder
-- proprietäre RK/Mali-Treiber benötigen.
-
-Wenn du hardware-beschleunigte OpenGL ES benötigst, stelle sicher, dass dein Armbian-Image die richtige GPU-Unterstützung hat. Falls du Probleme mit OpenGL-Initialisierung hast, prüfe:
-- `glxinfo` (falls installiert) oder dmesg/logs
-- Armbian- und Board-Foren für RK3588/Mali-Treiber
-
----
-
-## Benutzer- und Geräteberechtigungen
-Damit du auf Video-/DRM-Geräte zugreifen kannst, füge den Benutzer zur Video- und ggf. render-Gruppe hinzu:
+Build (C++)
+1. From project root:
 ```bash
-sudo usermod -aG video,render "$USER"
-# entweder neu einloggen oder:
-newgrp video
-```
-Prüfe, ob /dev/video0 bzw. /dev/dri/* existieren und welche Gruppenrechte gesetzt sind:
-```bash
-ls -l /dev/video* /dev/dri/*
-```
-
----
-
-## Repository klonen & bauen
-Wechsle in ein Arbeitsverzeichnis, klone das Repo und baue das Projekt:
-
-1) Klonen:
-```bash
-git clone git@github.com:seccouser/hdmi-in-display.git
-# oder HTTPS:
-# git clone https://github.com/seccouser/hdmi-in-display.git
-cd hdmi-in-display
-```
-
-2) Empfohlene CMake-Build-Variante (Out-of-source build):
-```bash
-# Erstelle Build-Ordner
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-# Alternativ wenn CMakeLists oder Abhängigkeiten spezielle Flags brauchen:
-# cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOTHER_OPTION=ON
-
-# Kompilieren
-cmake --build build -j"$(nproc)"
+cmake --build build -j$(nproc)
 ```
+2. Binary liegt dann in `build/hdmi_simple_display`.
 
-3) Install (optional, falls Projekt ein `install` target bereitstellt):
+Start:
 ```bash
-sudo cmake --install build
+./build/hdmi_simple_display
 ```
 
-Erwartetes Ergebnis: Binärdatei(en) liegen unter `build/`, z. B. `build/hdmi_simple_display`. Wenn CMake Fehler über fehlende Bibliotheken oder Header meldet, installiere die fehlenden dev-Pakete und wiederhole Schritt 2.
+Stellen sicher, dass das V4L2 Device vorhanden ist (/dev/video0 oder passe die define im Code).
 
 ---
 
-## Programm starten / testen
-Allgemein:
+Python OCR Integration (ocr_config_updater.py)
+
+Ziel: Tesseract/OpenCV OCR ausführen, erkannte Zahl in `control_ini.txt` schreiben (z. B. `port = 324`), und C++ Programm läd automatisch die neue Datei.
+
+1) Python Virtualenv (empfohlen)
+Im Projekt‑Root:
 ```bash
-# Beispiel — passe Pfade/Device-Optionen an, je nach Programm-CLI
-./build/hdmi_simple_display --device /dev/video0
+python3 -m venv .venv-ocr
+source .venv-ocr/bin/activate
+pip install --upgrade pip
+pip install opencv-python pytesseract
 ```
 
-Testen des V4L2-Geräts mit ffplay (schnell prüfen, ob Input anliegt):
+2) System‑Tesseract (erforderlich)
+Tesseract ist die native Engine, `pytesseract` ist ein Python‑Wrapper.
+Debian/Ubuntu:
 ```bash
-sudo apt install -y ffmpeg
-ffplay -f v4l2 -framerate 30 -video_size 1280x720 /dev/video0
+sudo apt update
+sudo apt install -y tesseract-ocr
+# optional: language packs
+sudo apt install -y tesseract-ocr-deu
 ```
 
-oder mit v4l2-ctl die Formate anzeigen:
-```bash
-v4l2-ctl --list-formats-ext -d /dev/video0
-```
+3) Skript ins Projekt kopieren
+Lege `ocr_config_updater.py` in den Projekt‑Root (oder einen festen Pfad). Das Repo enthält bereits die Datei (siehe Projektdateien).
 
-Falls dein Programm zusätzliche CLI-Optionen anbietet, starte `./build/hdmi_simple_display --help` oder sieh in README.md nach.
+4) Testlauf (manuell)
+Nachdem du einen Screenshot `display.png` erzeugt hast (Taste `s` im C++ Programm), teste das Skript manuell im venv:
+```bash
+source .venv-ocr/bin/activate
+python3 ocr_config_updater.py --image display.png --config control_ini.txt --key port --debug
+```
+- Bei Erfolg: das Skript gibt die erkannte Zahl auf stdout und schreibt `port = <Zahl>` in `control_ini.txt`.
+- Nutze `--roi x,y,w,h`, wenn die Zahl an bekannter Stelle ist (z. B. `--roi 600,200,720,400`) — ROI erhöht OCR‑Trefferquote deutlich.
 
 ---
 
-## Optional: systemd-Service einrichten (Autostart)
-Erzeuge eine Service-Datei `/etc/systemd/system/hdmi-in-display.service` (als root):
+Automatische Integration mit dem C++ Programm
 
-```ini
-[Unit]
-Description=HDMI In Display
-After=network.target
+Das C++ Programm startet das OCR‑Skript automatisch nach erfolgreichem Screenshot, wenn eine der folgenden Optionen gesetzt ist:
 
-[Service]
-User=seccouser
-Group=video
-WorkingDirectory=/home/seccouser/hdmi-in-display
-ExecStart=/home/seccouser/hdmi-in-display/build/hdmi_simple_display --device /dev/video0
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Anschließend aktivieren und starten:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable hdmi-in-display.service
-sudo systemctl start hdmi-in-display.service
-sudo journalctl -u hdmi-in-display.service -f
-```
-
-Passe `User`, `WorkingDirectory` und `ExecStart` an deine Pfade und Optionen an.
-
----
-
-## Weitere nützliche Tools/Tests
-- `v4l2-ctl` (siehe oben)
-- `ffplay` / `ffmpeg` für Debugging
-- `gst-launch-1.0` (GStreamer) falls du Pipeline-Tests machen möchtest:
+- Umgebungsvariable (Fallback)
+  - OCR_PYTHON_CMD — z.B.
   ```bash
-  sudo apt install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-  gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
+  export OCR_PYTHON_CMD="/voll/pfad/.venv-ocr/bin/python /voll/pfad/ocr_config_updater.py"
   ```
 
+- control_ini.txt (empfohlen)
+  - Setze in `control_ini.txt`:
+    ```
+    ocrPythonCmd = /mnt/ssd1/projects/hdmi-in-display/.venv-ocr/bin/python /mnt/ssd1/projects/hdmi-in-display/ocr_config_updater.py
+    ocrRoi = 600,200,720,400    # optional, wird an das Skript gehängt
+    ```
+  - Wenn `ocrRoi` gesetzt ist, hängt das Programm `--roi <ocrRoi>` an den Aufruf an.
+
+Das Programm ruft das Skript asynchron mittels popen() auf und fängt stdout/stderr ab (stderr wird jetzt umgeleitet und erscheint in den Programmlogs). Wenn das Skript Erfolg hat (Exit‑Code 0 und Ausgabe), lädt das C++ Programm `control_ini.txt` neu und wendet neue Parameter an (z. B. `port`).
+
 ---
 
-## Troubleshooting — häufige Probleme
-- OpenGL initialisiert nicht / GLSL Shader-Fehler:
-  - Prüfe ob Mesa-EGL/GLES oder proprietäre Mali-Treiber korrekt installiert sind.
-  - Starte ein simples GL-Testprogramm oder `es2info` / `glxinfo`.
-- Keine / falsche Berechtigungen für `/dev/video0`:
-  - Prüfe `ls -l /dev/video0` und Gruppenzugehörigkeit.
-  - Füge Benutzer zur `video`-Gruppe und re-login.
-- CMake findet Bibliotheken nicht:
-  - Fehlende `-dev` Pakete installieren und CMake Cache neu generieren:
-    ```bash
-    rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-    ```
-- Capture-Gerät liefert kein Bild:
-  - Teste mit `ffplay` oder `v4l2-ctl` ob das Gerät Frames liefert.
-  - Prüfe Verkabelung und dass das HDMI-Capture-Device vom Kernel unterstützt wird.
+Konfiguration: control_ini.txt
+- Beispiel (voll):
+```
+ocrPythonCmd = /mnt/ssd1/projects/hdmi-in-display/.venv-ocr/bin/python /mnt/ssd1/projects/hdmi-in-display/ocr_config_updater.py
+ocrRoi = 600,200,720,400
+
+fullInputSize = 3840,2160
+segments = 3,3
+subBlockSize = 1280,720
+
+tileSize = 128,144
+spacing = 98,90
+marginX = 0
+numTiles = 10,15
+
+inputTilesTopToBottom = 1
+
+modul1Serial = 1235976
+modul2Serial = 2345987
+modul3Serial = 3456123
+```
+- `ocrPythonCmd` optional; falls leer, verwendet das C++ Programm `OCR_PYTHON_CMD` Umgebungsvariable oder den Default `python3 ocr_config_updater.py`.
+- `ocrRoi` optional; Format `x,y,w,h` (Integer). Wird an `--roi` des Python Skripts übergeben.
+
+---
+
+Debugging Tipps
+- Wenn OCR nichts findet: teste das Python‑Skript manuell mit `--debug` und ggf. `--roi`.
+- Stelle sicher, dass `display.png` im CWD liegt oder gib absolute Pfade (C++ übergibt aktuell relative Pfade; du kannst `ocrPythonCmd` mit absoluten Pfad zur Scriptdatei setzen).
+- Falls das C++ Programm keine Ausgabe zeigt: suche nach den Logzeilen:
+  - `[screenshot-worker] saved: display.png`
+  - `[ocr] launching OCR: ...`
+  - `[ocr] OCR success, result='...'` oder `[ocr] OCR failed ... out='...'`
+- Wenn Python Module fehlen: aktiviere venv, pip install die fehlenden Pakete.
+- Wenn `tesseract` nicht gefunden: installiere system‑tesseract (apt/brew).
+
+---
+
+Optional / Erweiterungen
+- Automatische Dateinamen für Screenshots (Timestamp + erkannte Zahl) — kann leicht aktiviert werden.
+- Timeout fürs OCR‑Skript (kann in C++ ergänzt werden).
+- Mehrfache ROIs / automatische Stichprobe im Python‑Skript (empfohlen für robuste Erkennung) — kann ich implementieren.
+
+---
+
+Support
+Wenn du möchtest, dass ich die Änderungen committe und in deinen Branch pushe (feature/auto-resize-v4l2), sag „commit“ und ich erledige das. Wenn beim Testen Fehler auftreten, poste die Python (`--debug`) Logs und die relevanten C++ Konsolen‑Logs, ich helfe bei der Fehlersuche.

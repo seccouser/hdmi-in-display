@@ -1,6 +1,7 @@
 // hdmi_simple_display.cpp
 // Production: auto-resize, tiled uploads, V4L2 events, CLI, CPU UV-swap option, improved tiled upload reuse
-// Includes: runtime control_ini, modul*.txt offsets, gap handling, and async PNG screenshot via stb_image_write
+// Includes: runtime control_ini, modul*.txt offsets, gap handling, async PNG screenshot via stb_image_write,
+// and optional OCR integration via external Python script (ocr_config_updater.py)
 
 #include <iostream>
 #include <fstream>
@@ -28,6 +29,10 @@
 #include <memory>
 #include <atomic>
 #include <cmath>
+#include <mutex>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -302,6 +307,11 @@ struct ControlParams {
     int inputTilesTopToBottom = 1;
 
     int moduleSerials[3] = {0,0,0};
+
+    // OCR python command (optional). If set, used to invoke OCR script.
+    std::string ocrPythonCmd;
+    // optional ROI for OCR in form "x,y,w,h"
+    std::string ocrRoi;
 };
 
 // --- NEU: Hilfsfunktion, die aus den Seriennummern die Modul-Dateinamen erzeugt ---
@@ -381,6 +391,10 @@ static bool loadControlIni(const std::string &path, ControlParams &out) {
                 out.moduleSerials[1] = atoi(val.c_str());
             } else if (key == "modul3Serial") {
                 out.moduleSerials[2] = atoi(val.c_str());
+            } else if (key == "ocrPythonCmd") {
+                out.ocrPythonCmd = val;
+            } else if (key == "ocrRoi") {
+                out.ocrRoi = val;
             }
         }
         f.close();
@@ -395,11 +409,71 @@ static bool loadControlIni(const std::string &path, ControlParams &out) {
               << " spacing=" << out.spacingX << "x" << out.spacingY
               << " numTiles=" << out.numTilesPerRow << "x" << out.numTilesPerCol
               << " inputTopToBottom=" << out.inputTilesTopToBottom
-              << " serials=" << out.moduleSerials[0] << "," << out.moduleSerials[1] << "," << out.moduleSerials[2] << "\n";
+              << " serials=" << out.moduleSerials[0] << "," << out.moduleSerials[1] << "," << out.moduleSerials[2]
+              << " ocrCmd=" << out.ocrPythonCmd << " ocrRoi=" << out.ocrRoi << "\n";
     return true;
 }
 
 // async: generic frame -> PNG writer that supports NV12/NV21 and common packed formats
+// Also signals main thread after successful write to optionally run OCR.
+static std::atomic<bool> g_screenshot_saved_flag(false);
+static std::mutex g_screenshot_mutex;
+static std::string g_screenshot_saved_path;
+
+static std::atomic<bool> g_ocr_result_ready(false);
+static std::mutex g_ocr_mutex;
+static std::string g_ocr_result_string;
+static std::atomic<bool> g_ocr_thread_running(false);
+
+static std::string get_default_ocr_python_cmd() {
+    const char* env = std::getenv("OCR_PYTHON_CMD");
+    if (env && env[0]) return std::string(env);
+    return std::string("python3 ocr_config_updater.py");
+}
+
+static void run_ocr_and_signal(const std::string &python_cmd_with_args) {
+    if (g_ocr_thread_running.exchange(true)) {
+        std::cerr << "[ocr] OCR thread already running, skipping new request\n";
+        return;
+    }
+
+    std::thread([python_cmd_with_args]() {
+        // capture both stdout and stderr from the python process to help debugging
+        std::string cmd = python_cmd_with_args + " 2>&1";
+        std::array<char, 4096> buffer;
+        std::string result;
+
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::cerr << "[ocr] popen failed\n";
+            g_ocr_thread_running.store(false);
+            return;
+        }
+
+        while (fgets(buffer.data(), (int)buffer.size(), pipe) != nullptr) {
+            result += buffer.data();
+        }
+        int rc = pclose(pipe);
+        // trim whitespace
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ' || result.back() == '\t')) result.pop_back();
+        while (!result.empty() && (result.front() == ' ' || result.front() == '\t')) result.erase(result.begin());
+
+        if ((rc == 0 || WEXITSTATUS(rc) == 0) && !result.empty()) {
+            {
+                std::lock_guard<std::mutex> lk(g_ocr_mutex);
+                g_ocr_result_string = result;
+            }
+            g_ocr_result_ready.store(true, std::memory_order_release);
+            std::cerr << "[ocr] OCR success, result='" << result << "'\n";
+        } else {
+            // print the captured output to stderr for debugging
+            std::cerr << "[ocr] OCR failed or no output (rc=" << rc << ", out='" << result << "')\n";
+        }
+
+        g_ocr_thread_running.store(false);
+    }).detach();
+}
+
 static void async_save_frame_to_png(std::vector<unsigned char> ybuf,
                                     std::vector<unsigned char> uvbuf,
                                     std::vector<unsigned char> packed,
@@ -571,8 +645,16 @@ static void async_save_frame_to_png(std::vector<unsigned char> ybuf,
 
     int stride = width * comp;
     int ok = stbi_write_png(filename_png.c_str(), width, height, comp, rgb.data(), stride);
-    if (ok) std::cerr << "[screenshot-worker] saved: " << filename_png << "\n";
-    else std::cerr << "[screenshot-worker] failed to write PNG: " << filename_png << "\n";
+    if (ok) {
+        std::cerr << "[screenshot-worker] saved: " << filename_png << "\n";
+        {
+            std::lock_guard<std::mutex> lk(g_screenshot_mutex);
+            g_screenshot_saved_path = filename_png;
+        }
+        g_screenshot_saved_flag.store(true, std::memory_order_release);
+    } else {
+        std::cerr << "[screenshot-worker] failed to write PNG: " << filename_png << "\n";
+    }
 }
 
 // -----------------------------------------------------------------------------------
@@ -1261,7 +1343,7 @@ int main(int argc, char** argv) {
             SDL_GetWindowSize(win, &win_w, &win_h);
             glViewport(0, 0, win_w, win_h);
           } else if (k == SDLK_k) {
-            // Reload control_ini.txt and module files
+            // Reload control_ini.txt and module files (same logic as OCR reload)
             ControlParams newCtrl;
             if (loadControlIni("control_ini.txt", newCtrl)) {
                 // update active ctrl
@@ -1364,6 +1446,79 @@ int main(int argc, char** argv) {
       }
 
       ++frame_count;
+
+      // --- OCR integration: check flags and launch OCR or process OCR result ---
+      if (g_screenshot_saved_flag.load(std::memory_order_acquire)) {
+          std::string path;
+          {
+              std::lock_guard<std::mutex> lk(g_screenshot_mutex);
+              path = g_screenshot_saved_path;
+              g_screenshot_saved_path.clear();
+          }
+          g_screenshot_saved_flag.store(false);
+          if (!path.empty()) {
+              std::string python_cmd = !ctrl.ocrPythonCmd.empty() ? ctrl.ocrPythonCmd : get_default_ocr_python_cmd();
+              std::string config_path = "control_ini.txt";
+              std::string key = "port"; // adjust if you want different key
+              // build command
+              std::string cmd = python_cmd + " --image \"" + path + "\" --config \"" + config_path + "\" --key \"" + key + "\"";
+              if (!ctrl.ocrRoi.empty()) {
+                  cmd += " --roi " + ctrl.ocrRoi;
+              }
+              std::cerr << "[ocr] launching OCR: " << cmd << "\n";
+              run_ocr_and_signal(cmd);
+          }
+      }
+
+      if (g_ocr_result_ready.load(std::memory_order_acquire)) {
+          std::string found;
+          {
+              std::lock_guard<std::mutex> lk(g_ocr_mutex);
+              found = g_ocr_result_string;
+              g_ocr_result_string.clear();
+          }
+          g_ocr_result_ready.store(false);
+          if (!found.empty()) {
+              std::cerr << "[ocr] result available in main loop: " << found << "\n";
+              // reload control file and upload uniforms (same codepath as 'k' handler)
+              ControlParams newCtrl;
+              if (loadControlIni("control_ini.txt", newCtrl)) {
+                  ctrl = newCtrl;
+                  glUseProgram(program);
+                  if (loc_u_fullInputSize >= 0) glUniform2f(loc_u_fullInputSize, ctrl.fullInputW, ctrl.fullInputH);
+                  if (loc_u_segmentsX >= 0) glUniform1i(loc_u_segmentsX, ctrl.segmentsX);
+                  if (loc_u_segmentsY >= 0) glUniform1i(loc_u_segmentsY, ctrl.segmentsY);
+                  if (loc_u_subBlockSize >= 0) glUniform2f(loc_u_subBlockSize, ctrl.subBlockW, ctrl.subBlockH);
+                  if (loc_u_tileW >= 0) glUniform1f(loc_u_tileW, ctrl.tileW);
+                  if (loc_u_tileH >= 0) glUniform1f(loc_u_tileH, ctrl.tileH);
+                  if (loc_u_spacingX >= 0) glUniform1f(loc_u_spacingX, ctrl.spacingX);
+                  if (loc_u_spacingY >= 0) glUniform1f(loc_u_spacingY, ctrl.spacingY);
+                  if (loc_u_marginX >= 0) glUniform1f(loc_u_marginX, ctrl.marginX);
+                  if (loc_u_numTilesPerRow >= 0) glUniform1i(loc_u_numTilesPerRow, ctrl.numTilesPerRow);
+                  if (loc_u_numTilesPerCol >= 0) glUniform1i(loc_u_numTilesPerCol, ctrl.numTilesPerCol);
+                  if (loc_inputTilesTopToBottom >= 0) glUniform1i(loc_inputTilesTopToBottom, ctrl.inputTilesTopToBottom);
+                  if (loc_moduleSerials >= 0) glUniform1iv(loc_moduleSerials, 3, ctrl.moduleSerials);
+                  std::cerr << "[ocr] control_ini reloaded based on OCR update\n";
+                  // rebuild module filenames and reload offsets (like 'k' does)
+                  modFiles = buildModuleFilenames(ctrl);
+                  std::vector<GLint> newOffsets;
+                  if (loadOffsetsFromModuleFiles(modFiles, newOffsets)) {
+                      if (loc_offsetxy1 >= 0 && newOffsets.size() >= 150*2) {
+                          glUseProgram(program);
+                          glUniform2iv(loc_offsetxy1, 150, newOffsets.data());
+                          std::cerr << "[ocr] reloaded offsetxy1 from module files after OCR\n";
+                          offsetData.swap(newOffsets);
+                      } else {
+                          std::cerr << "[ocr] reload offsets: loc_offsetxy1 invalid or data incomplete\n";
+                      }
+                  } else {
+                      std::cerr << "[ocr] reload offsets failed after OCR\n";
+                  }
+              } else {
+                  std::cerr << "[ocr] failed to reload control_ini after OCR\n";
+              }
+          }
+      }
     }
 
     // Cleanup
