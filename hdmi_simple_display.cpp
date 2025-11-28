@@ -304,6 +304,20 @@ struct ControlParams {
     int moduleSerials[3] = {0,0,0};
 };
 
+// --- NEU: Hilfsfunktion, die aus den Seriennummern die Modul-Dateinamen erzeugt ---
+static std::array<std::string,3> buildModuleFilenames(const ControlParams &ctrl) {
+    std::array<std::string,3> names;
+    for (int i = 0; i < 3; ++i) {
+        // Falls Seriennummer 0 (Default) ist, bauen wir fallback name modul{i+1}.txt
+        if (ctrl.moduleSerials[i] == 0) {
+            names[i] = std::string("modul") + std::to_string(i+1) + ".txt";
+        } else {
+            names[i] = std::string("m") + std::to_string(ctrl.moduleSerials[i]) + ".txt";
+        }
+    }
+    return names;
+}
+
 static bool loadControlIni(const std::string &path, ControlParams &out) {
     std::ifstream f;
     std::string exeDir = getExecutableDir();
@@ -323,6 +337,7 @@ static bool loadControlIni(const std::string &path, ControlParams &out) {
             if (eq == std::string::npos) continue;
             std::string key = line.substr(0, eq);
             std::string val = line.substr(eq+1);
+            // trim
             auto trim = [](std::string &str) {
                 size_t a = str.find_first_not_of(" \t\r\n");
                 if (a == std::string::npos) { str.clear(); return; }
@@ -355,10 +370,17 @@ static bool loadControlIni(const std::string &path, ControlParams &out) {
             } else if (key == "inputTilesTopToBottom") {
                 out.inputTilesTopToBottom = atoi(val.c_str()) ? 1 : 0;
             } else if (key == "moduleSerials") {
+                // legacy: comma separated three ints
                 int a=0,b=0,c2=0;
                 if (sscanf(val.c_str(), "%d,%d,%d", &a, &b, &c2) >= 1) {
                     out.moduleSerials[0] = a; out.moduleSerials[1] = b; out.moduleSerials[2] = c2;
                 }
+            } else if (key == "modul1Serial") {
+                out.moduleSerials[0] = atoi(val.c_str());
+            } else if (key == "modul2Serial") {
+                out.moduleSerials[1] = atoi(val.c_str());
+            } else if (key == "modul3Serial") {
+                out.moduleSerials[2] = atoi(val.c_str());
             }
         }
         f.close();
@@ -419,7 +441,6 @@ static void async_save_frame_to_png(std::vector<unsigned char> ybuf,
         if (ybuf.empty() && uvbuf.empty() && packedSize == (ylen + uvlen)) {
             ybuf.assign(packed.begin(), packed.begin() + ylen);
             uvbuf.assign(packed.begin() + ylen, packed.begin() + ylen + uvlen);
-            // For logging clarity, treat as NV12 unless uv_swap_flag indicates NV21
             std::cerr << "[screenshot-worker] heuristic: split packed->Y/UV for NV12-like data\n";
         }
 
@@ -553,6 +574,7 @@ static void async_save_frame_to_png(std::vector<unsigned char> ybuf,
     if (ok) std::cerr << "[screenshot-worker] saved: " << filename_png << "\n";
     else std::cerr << "[screenshot-worker] failed to write PNG: " << filename_png << "\n";
 }
+
 // -----------------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
@@ -865,13 +887,15 @@ int main(int argc, char** argv) {
     if (loc_full_range >= 0) glUniform1i(loc_full_range, opt_full_range);
     if (loc_view_mode >= 0) glUniform1i(loc_view_mode, 0);
 
-    // Module files and initial load
-    std::array<std::string,3> modFiles = { "modul1.txt", "modul2.txt", "modul3.txt" };
-    std::vector<GLint> offsetData;
-
     // Control params (from control_ini.txt)
     ControlParams ctrl;
     loadControlIni("control_ini.txt", ctrl);
+
+    // Now build module filenames based on control.ini serials
+    std::array<std::string,3> modFiles = buildModuleFilenames(ctrl);
+    std::cerr << "Module filenames: " << modFiles[0] << " , " << modFiles[1] << " , " << modFiles[2] << "\n";
+
+    std::vector<GLint> offsetData;
 
     // Upload initial control uniforms
     glUseProgram(program);
@@ -1237,46 +1261,48 @@ int main(int argc, char** argv) {
             SDL_GetWindowSize(win, &win_w, &win_h);
             glViewport(0, 0, win_w, win_h);
           } else if (k == SDLK_k) {
-            std::vector<GLint> newOffsets;
-            if (loadOffsetsFromModuleFiles(modFiles, newOffsets)) {
-                std::cerr << "Reload: offsetData[0..9]:";
-                for (size_t i = 0; i < std::min<size_t>(newOffsets.size(), 10); ++i) std::cerr << " " << newOffsets[i];
-                std::cerr << "\n";
-                if (loc_offsetxy1 >= 0 && newOffsets.size() >= 150*2) {
-                    glUseProgram(program);
-                    glUniform2iv(loc_offsetxy1, 150, newOffsets.data());
-                    std::cerr << "Reloaded offsetxy1 from module files (on 'k' press) and uploaded to shader\n";
-                    offsetData.swap(newOffsets);
-                } else {
-                    std::cerr << "Reload failed: loc_offsetxy1 invalid or data incomplete\n";
-                }
-            } else {
-                std::cerr << "Failed to read module files on reload\n";
-            }
-
-            // Also reload control_ini.txt and upload control uniforms
+            // Reload control_ini.txt and module files
             ControlParams newCtrl;
             if (loadControlIni("control_ini.txt", newCtrl)) {
-                glUseProgram(program);
-                if (loc_u_fullInputSize >= 0) glUniform2f(loc_u_fullInputSize, newCtrl.fullInputW, newCtrl.fullInputH);
-                if (loc_u_segmentsX >= 0) glUniform1i(loc_u_segmentsX, newCtrl.segmentsX);
-                if (loc_u_segmentsY >= 0) glUniform1i(loc_u_segmentsY, newCtrl.segmentsY);
-                if (loc_u_subBlockSize >= 0) glUniform2f(loc_u_subBlockSize, newCtrl.subBlockW, newCtrl.subBlockH);
-
-                if (loc_u_tileW >= 0) glUniform1f(loc_u_tileW, newCtrl.tileW);
-                if (loc_u_tileH >= 0) glUniform1f(loc_u_tileH, newCtrl.tileH);
-                if (loc_u_spacingX >= 0) glUniform1f(loc_u_spacingX, newCtrl.spacingX);
-                if (loc_u_spacingY >= 0) glUniform1f(loc_u_spacingY, newCtrl.spacingY);
-                if (loc_u_marginX >= 0) glUniform1f(loc_u_marginX, newCtrl.marginX);
-                if (loc_u_numTilesPerRow >= 0) glUniform1i(loc_u_numTilesPerRow, newCtrl.numTilesPerRow);
-                if (loc_u_numTilesPerCol >= 0) glUniform1i(loc_u_numTilesPerCol, newCtrl.numTilesPerCol);
-
-                if (loc_inputTilesTopToBottom >= 0) glUniform1i(loc_inputTilesTopToBottom, newCtrl.inputTilesTopToBottom);
-                if (loc_moduleSerials >= 0) glUniform1iv(loc_moduleSerials, 3, newCtrl.moduleSerials);
-
                 // update active ctrl
                 ctrl = newCtrl;
+                glUseProgram(program);
+                if (loc_u_fullInputSize >= 0) glUniform2f(loc_u_fullInputSize, ctrl.fullInputW, ctrl.fullInputH);
+                if (loc_u_segmentsX >= 0) glUniform1i(loc_u_segmentsX, ctrl.segmentsX);
+                if (loc_u_segmentsY >= 0) glUniform1i(loc_u_segmentsY, ctrl.segmentsY);
+                if (loc_u_subBlockSize >= 0) glUniform2f(loc_u_subBlockSize, ctrl.subBlockW, ctrl.subBlockH);
+
+                if (loc_u_tileW >= 0) glUniform1f(loc_u_tileW, ctrl.tileW);
+                if (loc_u_tileH >= 0) glUniform1f(loc_u_tileH, ctrl.tileH);
+                if (loc_u_spacingX >= 0) glUniform1f(loc_u_spacingX, ctrl.spacingX);
+                if (loc_u_spacingY >= 0) glUniform1f(loc_u_spacingY, ctrl.spacingY);
+                if (loc_u_marginX >= 0) glUniform1f(loc_u_marginX, ctrl.marginX);
+                if (loc_u_numTilesPerRow >= 0) glUniform1i(loc_u_numTilesPerRow, ctrl.numTilesPerRow);
+                if (loc_u_numTilesPerCol >= 0) glUniform1i(loc_u_numTilesPerCol, ctrl.numTilesPerCol);
+
+                if (loc_inputTilesTopToBottom >= 0) glUniform1i(loc_inputTilesTopToBottom, ctrl.inputTilesTopToBottom);
+                if (loc_moduleSerials >= 0) glUniform1iv(loc_moduleSerials, 3, ctrl.moduleSerials);
+
                 std::cerr << "Reloaded control_ini.txt and uploaded shader uniforms\n";
+
+                // regenerate module filenames based on possibly new serials
+                modFiles = buildModuleFilenames(ctrl);
+                std::cerr << "Reload: module filenames now: " << modFiles[0] << " , " << modFiles[1] << " , " << modFiles[2] << "\n";
+
+                // load offsets from new files
+                std::vector<GLint> newOffsets;
+                if (loadOffsetsFromModuleFiles(modFiles, newOffsets)) {
+                    if (loc_offsetxy1 >= 0 && newOffsets.size() >= 150*2) {
+                        glUseProgram(program);
+                        glUniform2iv(loc_offsetxy1, 150, newOffsets.data());
+                        std::cerr << "Reloaded offsetxy1 from module files (on 'k' press) and uploaded to shader\n";
+                        offsetData.swap(newOffsets);
+                    } else {
+                        std::cerr << "Reload failed: loc_offsetxy1 invalid or data incomplete\n";
+                    }
+                } else {
+                    std::cerr << "Failed to read module files on reload\n";
+                }
             } else {
                 std::cerr << "control_ini.txt not found on reload; keeping previous control values\n";
             }
@@ -1303,12 +1329,12 @@ int main(int argc, char** argv) {
             }
             std::cerr << "rotation = " << rotation << " (0=0deg,1=90deg,2=180deg,3=270deg) (step=180°)\n";
           } else if (k == SDLK_s) {
-std::cerr << "s pressed: lastIsNV12_NV21=" << lastIsNV12_NV21
-          << " lastY=" << lastY.size() << " lastUV=" << lastUV.size()
-          << " lastPacked=" << lastPackedSize
-          << " last_pixfmt=" << last_pixfmt << " (" << fourcc_to_str(last_pixfmt) << ")"
-          << " last_w=" << last_width << " last_h=" << last_height
-          << " uv_swap=" << uv_swap << "\n";
+            std::cerr << "s pressed: lastIsNV12_NV21=" << lastIsNV12_NV21
+                      << " lastY=" << lastY.size() << " lastUV=" << lastUV.size()
+                      << " lastPacked=" << lastPackedSize
+                      << " last_pixfmt=" << last_pixfmt << " (" << fourcc_to_str(last_pixfmt) << ")"
+                      << " last_w=" << last_width << " last_h=" << last_height
+                      << " uv_swap=" << uv_swap << "\n";
 
             if (last_width <= 0 || last_height <= 0) {
                 std::cerr << "No last frame dimensions available. Skipping.\n";

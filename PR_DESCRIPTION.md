@@ -1,130 +1,188 @@
-# feature/auto-resize-v4l2 — Per‑Tile Ausgabe‑Offsets + Laufzeit Drehen/Spiegeln + Gap‑Support
+# feature/auto-resize-v4l2 — Per‑Tile Offsets, Gap‑Support, Laufzeit‑Rotate/Flip, Steuerdatei + Async‑Screenshots
 
-## Zusammenfassung
-Dieser Branch fügt pixelgenaue Ausgabe‑Offsets pro Kachel (insgesamt 150 Kacheln) hinzu, Laufzeitsteuerungen zum Drehen und Spiegeln des Eingangsbildes sowie konfigurierbare vertikale „Gaps“ (Abstände) zwischen Kachel‑Zeilen, um physische Display‑Pitches abzubilden. Die Offsets werden aus drei Moduldateien (modul1.txt, modul2.txt, modul3.txt) geladen und können zur Laufzeit neu eingelesen werden. Die Änderung belässt die Quell‑Sampling‑Logik unverändert und verschiebt nur die angezeigten Kachel‑Rechtecke; zusätzlich werden Uniform‑Uploads und Textur‑Neuzuordnungen bei V4L2‑Formatänderungen robuster gemacht.
+## Kurzüberblick
+Dieser Branch erweitert hdmi_simple_display um:
+- Pixelgenaue Ausgabe‑Offsets pro Kachel (150 Offsets),
+- Laufzeitsteuerung zum Drehen und Spiegeln des Eingangsbildes,
+- Konfigurierbare vertikale „Gaps“ zwischen Kachel‑Zeilen,
+- eine konfigurierbare Steuerdatei `control_ini.txt` (inkl. Modul‑Seriennummern),
+- automatisches Ableiten der Modul‑Dateinamen aus Seriennummern (`m<serial>.txt`),
+- asynchrone Screenshot‑Funktion (Taste `s`) mit Unterstützung verbreiteter YUV/packed Formate,
+- Live‑Reload der Parameter/Offsets (Taste `k`) und ausführliche Debug‑Logs.
 
-## Warum
-- Korrigiert fehlerhaft ausgerichtete Kacheln durch pixelgenaue Offsets, ohne das Quell‑Sampling zu verändern.  
-- Modelliert physische vertikale Nähte/Abstände zwischen zusammengeschalteten Displays, indem der vertikale Abstand an bestimmten Stellen auf 0 gesetzt wird.  
-- Ermöglicht einfache Laufzeitanpassung über Textdateien und eine Reload‑Taste.  
-- Beibehaltung leistungsfähiger Shader‑ und Upload‑Logik für NV12/NV21 Formate.
+Alle Änderungen wurden so umgesetzt, dass die normale Rendering/V4L2‑Loop nicht durch Screenshot‑Erstellung oder Reload blockiert wird.
 
-## Kernfunktionen
-- Per‑Tile Ausgabe‑Offsets:
-  - 150 ivec2‑Offsets (`offsetxy1[150]`) werden per `glUniform2iv` an den Fragment‑Shader übergeben.
-  - Interpretation: `offset.x` positiv → Kachel nach rechts verschieben; negativ → nach links. `offset.y` positiv → Kachel nach unten verschieben; negativ → nach oben.
-  - Offsets verschieben ausschließlich die ausgegebenen Kachel‑Rechtecke; das Sampling aus der Eingangstextur bleibt unverändert.
+---
 
-- Laufzeit‑Reload:
-  - `modul1.txt` / `modul2.txt` / `modul3.txt` (je bis zu 50 Paare) werden vom Programm gelesen.
-  - Taste `k` lädt die Dateien zur Laufzeit neu und lädt die Offsets in den Shader.
+## Neu: Modul‑Dateinamen basierend auf Seriennummern
+- In `control_ini.txt` werden die Seriennummern der Module als drei Einträge definiert:
+  - modul1Serial = 1235976
+  - modul2Serial = 2345987
+  - modul3Serial = 3456123
+- Aus diesen Werten erzeugt das Programm die Modul‑Dateinamen:
+  - m1235976.txt, m2345987.txt, m3456123.txt
+- Verhalten:
+  - Beim Start und beim Reload (Taste `k`) wird `control_ini.txt` gelesen und daraus `modFiles` erzeugt.
+  - Die Loader‑Routine sucht für jede Moduldatei zuerst im Executable‑Verzeichnis (exe dir) und danach im aktuellen Arbeitsverzeichnis (CWD).
+  - Falls eine Seriennummer den Wert `0` hat (Default), wird als Fallback weiterhin `modul1.txt` / `modul2.txt` / `modul3.txt` erwartet — so bleibt die Lösung abwärtskompatibel.
+- Du musst nun also sicherstellen, dass die Dateien mit den Namen `m<serial>.txt` an einem der beiden geprüften Orte vorhanden sind.
 
-- Eingangstransformationen:
-  - Uniform `rot` (0/1/2/3 → 0°/90°/180°/270° CW) wird auf die Input‑UVs vor dem Sampling angewandt.
-  - `flip_x` und `flip_y` schalten horizontales/vertikales Spiegeln des Eingangs ein/aus.
-  - Tasten: `r` = Rotieren (Branch nutzt standardmäßig 180°-Schritt), `h` = horizontales Spiegeln, `v` = vertikales Spiegeln.
+---
 
-- Gap‑Kontrolle (neu):
-  - Shader‑Uniforms `gap_count` und `gap_rows` definieren vertikale Gaps zwischen Kachel‑Zeilen.
-  - Jeder Eintrag in `gap_rows` ist ein 1‑basierter Zeilenindex `g`, der bedeutet: „der Abstand zwischen Zeile g und g+1 wird als 0 behandelt“.
-  - Beispiel‑Default: `gap_rows = {5, 10}` → kein vertikaler Abstand zwischen Reihen 5↔6 und 10↔11 (modelliert Display‑Nähte).
-  - Setzung aus C++ via `glUniform1i(loc_gap_count, ...)` und `glUniform1iv(loc_gap_rows, ARRAY_SIZE, ...)`.
-  - Array‑Größe im Shader ist standardmäßig 8; bei Bedarf anpassbar.
+## Steuerdatei `control_ini.txt` (erweitert)
+- Zweck: zentrale Konfiguration für Shader/Grid/Module.
+- Unterstützte Keys (key = value; Kommentare mit `#`):
+  - fullInputSize = W,H
+  - segments = X,Y
+  - subBlockSize = W,H
+  - tileSize = W,H
+  - spacing = X,Y
+  - marginX = N
+  - numTiles = cols,rows
+  - inputTilesTopToBottom = 0|1
+  - modul1Serial = 1235976
+  - modul2Serial = 2345987
+  - modul3Serial = 3456123
+- Zusätzlich wird weiterhin die legacy‑Form gelesen:
+  - moduleSerials = 1235976,2345987,3456123
+  - Falls sowohl legacy als auch die neuen Einzel‑Keys vorhanden sind, haben die Einzel‑Keys Vorrang.
+- Beispiel:
+  ```
+  fullInputSize = 3840,2160
+  segments = 3,3
+  subBlockSize = 1280,720
 
-- Robustheit / Benutzerfreundlichkeit:
-  - Uniforms werden pro Frame hochgeladen, um Optimierungen durch den Treiber (Uniform wird entfernt) zu vermeiden.
-  - Loader prüft ausführbares Verzeichnis und aktuelles Arbeitsverzeichnis, loggt Versuche und Einlese‑Anzahlen.
-  - Texturen werden bei V4L2‑Formatwechseln neu alloziert; UV‑Swap‑Erkennung und optionales CPU‑UV‑Swap werden unterstützt.
-  - Umfangreiche Konsolenlogs zur Debugging‑Unterstützung (Uniform‑Locations, geladene Offsets).
+  tileSize = 128,144
+  spacing = 98,90
+  marginX = 0
+  numTiles = 10,15
 
-## Geänderte / wichtige Dateien
-- `hdmi_simple_display.cpp`
-  - Aktualisiert: Loader für Moduldateien + Logging, Uniform‑Uploads für `offsetxy1`, `rot`, `flip_x`, `flip_y`, `gap_count`, `gap_rows`, Tastatur‑Handling (`k`, `h`, `v`, `r`), Textur‑Neuzuordnung.
-- `shaders/shader.frag.glsl`
-  - Aktualisiert: wendet per‑tile Ausgabe‑Offsets auf die angezeigten Kachel‑Rechtecke an, unterstützt Input‑UV Dreh/Flip und gap‑aware Y‑Positionierung.
-- (Vertex‑Shader unverändert.)
+  inputTilesTopToBottom = 1
 
-## Vom Shader verwendete Uniforms
-- ivec2 offsetxy1[150]        — per‑Tile Ausgabe‑Offsets (Pixel)
-- int rot                    — Rotation des Eingangs (0..3)
-- int flip_x, flip_y         — Spiegeln des Eingangs
-- int gap_count              — Anzahl gültiger Einträge in gap_rows
-- int gap_rows[8]            — Liste (1‑basiert) von Zeilen, nach denen spacing = 0 gelten soll
-- int uv_swap, full_range, use_bt709, view_mode, segmentIndex
+  modul1Serial = 1235976
+  modul2Serial = 2345987
+  modul3Serial = 3456123
+  ```
 
-## Format der Moduldateien (`modul1.txt` / `modul2.txt` / `modul3.txt`)
-- Bis zu 50 Zeilen pro Datei (fehlende Einträge werden mit 0,0 aufgefüllt).
-- Jede gültige Zeile: zwei ganze Zahlen, durch Whitespace getrennt:
+---
+
+## Per‑Tile Offsets und Moduldateien
+- Offsets werden über drei Dateien geladen: standardmäßig die aus Seriennummern abgeleiteten `m<serial>.txt` (oder fallback `modulN.txt`).
+- Format pro Datei: bis zu 50 Zeilen, jede Zeile zwei ints:
   ```
   <x> <y>
   ```
-  Beispiel:
-  ```
-  -3 5
-  0 0
-  2 -1
-  ```
-- Zeilen, die mit `#` beginnen oder leer sind, werden ignoriert.
-- Dateien werden im ausführbaren Verzeichnis (exe dir) und im aktuellen Arbeitsverzeichnis gesucht.
+  Leerzeilen und `#`‑Kommentare werden ignoriert. Fehlende Einträge werden mit `0,0` aufgefüllt.
+- Die gelesenen 150 (3×50) Paare werden per `glUniform2iv(loc_offsetxy1, 150, data)` ans Fragment‑Shader übergeben.
 
-## Gaps konfigurieren (C++)
-- Default im Code: zwei Gaps nach Zeile 5 und nach Zeile 10 (passend für drei vertikal gestapelte Displays mit von dir erwähnter Kachel‑Pitch).
-- Stelle im Code (nach Shader‑Link / `glGetUniformLocation`):
-  ```c++
-  const int GAP_ARRAY_SIZE = 8;
-  int gap_count = 2;
-  int gap_rows_arr[GAP_ARRAY_SIZE] = { 5, 10, 0, 0, 0, 0, 0, 0 };
-  if (loc_gap_count >= 0) glUniform1i(loc_gap_count, gap_count);
-  if (loc_gap_rows >= 0)  glUniform1iv(loc_gap_rows, GAP_ARRAY_SIZE, gap_rows_arr);
-  ```
-- Zur Laufzeit ändern:
-  - Noch nicht standardmäßig vorhanden; kann aber leicht per Konfigurationsdatei oder CLI‑Optionen nachgerüstet werden.
+---
 
-## Build & Test
+## Gap‑Support (vertikale Nähte)
+- Uniforms:
+  - gap_count — Anzahl gültiger Einträge
+  - gap_rows[8] — 1‑basierte Zeilennummern; an diesen Stellen wird der vertikale spacing auf 0 gesetzt.
+- Default im Code: z. B. `{5,10}` zur Modellierung von Display‑Nähten.
+- Werte sind 1‑basiert und dürfen im Bereich `1 .. (numTilesPerCol-1)` liegen.
+
+---
+
+## Laufzeitsteuerungen (Hotkeys)
+- s — Screenshot (asynchron; Ergebnis: `display.png` im CWD)
+- k — Reload: liest `control_ini.txt` und die Moduldateien neu, lädt Offsets in Shader
+- h — Toggle horizontales Spiegeln (flip_x)
+- v — Toggle vertikales Spiegeln (flip_y)
+- r — Rotation (aktuell 180° steps; kann auf 90° pro Druck umgestellt werden)
+- f — Fullscreen toggle (SDL)
+- ESC / Fenster schließen — Beenden
+
+---
+
+## Screenshot‑Funktion (Technik & Verhalten)
+- Beim Empfang jedes Frames werden minimal nötige Rohdaten zwischengespeichert:
+  - NV12/NV21: lastY + lastUV
+  - Andere / single‑plane: lastPacked (komplettes Frame‑Blob), last_pixfmt, last_width/last_height
+- Beim Drücken von `s`:
+  - Relevante Puffer werden kopiert und an einen detached `std::thread` übergeben.
+  - `async_save_frame_to_png(...)` dekodiert abhängig vom Format:
+    - NV12/NV21: direkte Y/UV‑Dekodierung (uv_swap berücksichtigt)
+    - Heuristik: wenn `packedSize == Y_len + UV_len` → Split packed→Y/UV und dekodieren als NV12‑like
+    - Packed 4:2:2: YUYV / UYVY → korrekt dekodiert
+    - Fallback: rohes RGB wenn Byte‑Größe passt
+  - PNG wird mit `stb_image_write` geschrieben (kein externes Tool nötig).
+- Worker‑Logs: `[screenshot-worker] start ...` / `[screenshot-worker] saved: display.png` bzw. Fehlernachrichten.
+- Performance: Hauptloop bleibt ungebremst; CPU‑Arbeit + Datei‑I/O läuft asynchron.
+
+---
+
+## Shader‑Uniforms (kompakt)
+- sampler2D texY, texUV
+- ivec2 offsetxy1[150]
+- int segmentIndex
+- vec2 u_fullInputSize
+- int u_segmentsX, u_segmentsY
+- vec2 u_subBlockSize
+- float u_tileW, u_tileH, u_spacingX, u_spacingY, u_marginX
+- int u_numTilesPerRow, u_numTilesPerCol
+- int rot, flip_x, flip_y
+- int gap_count, gap_rows[8]
+- int inputTilesTopToBottom
+- int moduleSerials[3]
+- int uv_swap, full_range, use_bt709, view_mode
+
+---
+
+## Build & Test (Kurz)
 1. Build:
-   ```bash
+   ```
    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
    cmake --build build -j$(nproc)
    ```
-2. Moduldateien anlegen (Beispiel):
-   ```bash
-   echo "-3 5" > modul1.txt   # erste Kachel: 3px links, 5px nach unten
-   # modul2.txt / modul3.txt analog oder leer lassen
+2. `control_ini.txt` anpassen (insbesondere modul1Serial/2/3).
+3. Modul‑Dateien erzeugen/platzieren (Beispiel):
+   - m1235976.txt, m2345987.txt, m3456123.txt in exe‑dir oder CWD
+4. Start:
    ```
-3. Starten:
-   ```bash
    ./build/hdmi_simple_display
    ```
-4. Steuerung:
-   - `k` : reload modul1/2/3 und Offsets hochladen  
-   - `h` : horizontales Spiegeln (Input) toggle  
-   - `v` : vertikales Spiegeln (Input) toggle  
-   - `r` : Input rotieren (Branch‑Default: 180° pro Druck)  
-   - `f` : Fullscreen toggle  
-   - `ESC`: Beenden
+5. Interaktion:
+   - `k` : Reload control + modulfiles (falls du die Moduldateien geändert hast)
+   - `s` : Screenshot schreiben (asynchron)
+   - `h`, `v`, `r`, `f`, `ESC` wie oben
 
-## Beispiel‑Ablauf
-1. Leg `modul1.txt` in das Verzeichnis der ausführbaren Datei; für die erste Kachel:
-   ```
-   -3 5
-   ```
-2. Programm starten und `k` drücken. Die Konsole zeigt gelesene Einträge und Upload‑Bestätigung. Ergebnis: erste Kachel verschiebt sich 3px nach links und 5px nach unten.  
-3. Für drei vertikal gestapelte Displays ohne sichtbaren Zwischenraum sorge dafür, dass `gap_rows` die Indizes enthält, nach denen der spacingY auf 0 gesetzt werden soll (z. B. 5 und 10 im Default).
+---
 
-## Hinweise & Einschränkungen
-- Falls der GLSL‑Compiler uniforme Variablen optimiert (Location == -1), meldet das Programm dies in der Konsole. In diesem Branch werden die relevanten Uniforms im Shader verwendet, sodass Locations typischerweise gültig sind.  
-- Offsets können zu Überlappungen oder Lücken führen; Lücken werden standardmäßig schwarz gerendert. Falls gewünscht, kann stattdessen eine Hintergrundfarbe oder Füllung implementiert werden.  
-- `gap_rows` sind 1‑basiert und müssen im Bereich `1 .. (numTilesPerCol-1)` liegen. Die Array‑Größe ist standardmäßig 8 — bei Bedarf vergrößern.
+## Debugging Hinweise
+- Beim Start werden Suchpfade für Module geloggt:
+  - z. B. `Trying open offsets file: /path/to/build/m1235976.txt` (exe dir)
+  - Falls nicht gefunden: `Trying open offsets file: m1235976.txt` (CWD)
+- Wenn Offsets korrekt geladen wurden: `Loaded offsetxy1 from module files (initial)` (mit Beispiel‑Werten).
+- Screenshot‑Debug: `s pressed: last_pixfmt=... (FOURCC) lastPacked=... last_w=... last_h=...` und `[screenshot-worker] ...`.
+- Falls eine Uniform im Shader optimiert wurde (Location == -1), wird eine Warnung geloggt; im aktuellen Branch sind die Uniforms aktiv genutzt, daher üblicherweise sichtbar.
 
-## Vorgeschlagener Commit & PR‑Meta
-- Commit‑Message:
+---
+
+## Hinweise & ToDos / Erweiterungen (optional)
+- Automatische Dateinamen für Screenshots (Timestamp + modulSerial) — kann leicht ergänzt werden.
+- FBO‑FullInput‑Screenshot (render FBO in fullInputSize + glReadPixels) — empfohlen, wenn GPU/Textur bereits das komplette FullInput enthält.
+- Optionales konfigurierbares Modul‑Prefix (statt hart `"m"`) via `control_ini.txt`.
+- UI/OSD Bestätigung nach Screenshot (kleine On‑Screen‑Meldung).
+- Größere `gap_rows` Array‑Länge falls mehr Gaps nötig sind (aktuell 8).
+
+---
+
+## PR / Commit Hinweise
+- Vorschlag Commit‑Message:
   ```
-  Add per-tile output offsets, gap support and runtime rotate/flip controls; enhance loader logging
+  Add per-tile offsets, gap support, runtime rotate/flip, control_ini with module serials and async screenshot + module filenames from serials
   ```
 - PR‑Titel:
   ```
-  feature/auto-resize-v4l2: per-tile offsets + gap handling + runtime rotate/flip
+  feature/auto-resize-v4l2: per‑tile offsets + gap handling + runtime rotate/flip + screenshots + module filename by serial
   ```
-- PR‑Beschreibung: Zusammenfassung + Key features + How to build & test (oben verwenden).
 
+---
 
+Wenn du möchtest, übernehme ich:
+- Commit & Push in `feature/auto-resize-v4l2` mit obigen Änderungen,
+- zusätzlich: automatische Screenshot‑Dateinamen (Timestamp + modul1Serial),
+- oder: FBO‑basierte FullInput‑Screenshot‑Implementierung — sag welche Variante du willst.
