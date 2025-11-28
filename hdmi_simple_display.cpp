@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
     }
 
     // Flip/rotation defaults (adjust if needed)
-    int flip_x = 1; // horizontal mirror default
+    int flip_x = 0; // horizontal mirror default
     int flip_y = 1; // vertical flip default
     int rotation = 0; // 0..3 (0=0deg,1=90cw,2=180deg,3=270deg)
     // Upload initial values (only if locations valid)
