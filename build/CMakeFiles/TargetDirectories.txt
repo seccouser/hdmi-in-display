@@ -1,0 +1,3 @@
+/mnt/ssd1/projects/hdmi-in-display/build/CMakeFiles/hdmi_simple_display.dir
+/mnt/ssd1/projects/hdmi-in-display/build/CMakeFiles/edit_cache.dir
+/mnt/ssd1/projects/hdmi-in-display/build/CMakeFiles/rebuild_cache.dir
