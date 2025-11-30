@@ -1,0 +1,25 @@
+# Global
+ocrPythonCmd = /mnt/ssd1/projects/hdmi-in-display/.venv-ocr/bin/python /mnt/ssd1/projects/hdmi-in-display/ocr_config_updater.py
+ocrRoi = 600,200,720,400
+
+# control_ini.txt - key=value pairs
+fullInputSize = 3840,2160
+segments = 3,3
+subBlockSize = 1280,720
+
+tileSize = 128,144
+spacing = 98,90
+marginX = 0
+numTiles = 10,15
+
+inputTilesTopToBottom = 1
+
+# Modul-Seriennummern: entweder als ein Eintrag (legacy) oder als drei separate Keys
+# Legacy (wird weiterhin gelesen):
+# moduleSerials = 1235976,2345987,3456123
+
+# Neue, empfohlene Form (je ein Key):
+modul1Serial = 1235976
+modul2Serial = 2345987
+modul3Serial = 3456123
+port = 324

@@ -1,1 +1,3 @@
-# Ignored files and directories\n*.o\n*.out\n.DS_Store\n
+# Ignored files and directories\n*.o\n*.out\n.DS_Store\n#CMakeLists.txt#
+cmake-build-release/
+.idea/
