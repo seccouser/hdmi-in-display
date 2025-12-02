@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -52,6 +53,8 @@ constexpr int STREAM_RESET_RETRIES = 3;       // Number of stream reset attempts
 constexpr int DEFAULT_WIDTH = 1920;
 constexpr int DEFAULT_HEIGHT = 1080;
 constexpr int NUM_BUFFERS = 4;
+constexpr int MAX_IMAGE_WIDTH = 8192;         // Maximum test pattern image width
+constexpr int MAX_IMAGE_HEIGHT = 8192;        // Maximum test pattern image height
 
 // Global state
 static bool g_verbose = false;
@@ -173,7 +176,28 @@ static bool loadTestPatternImage(const std::string& imagePath, AppState& state) 
     
     LOG_INFO("Loading test pattern from: %s", imagePath.c_str());
     
+    // First, check image dimensions without loading the full image
     int width, height, channels;
+    if (!stbi_info(imagePath.c_str(), &width, &height, &channels)) {
+        LOG_ERROR("Failed to read image info from '%s': %s", 
+                  imagePath.c_str(), stbi_failure_reason());
+        return false;
+    }
+    
+    // Validate image dimensions to prevent excessive memory allocation
+    if (width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT) {
+        LOG_ERROR("Test pattern image '%s' dimensions %dx%d exceed maximum %dx%d",
+                  imagePath.c_str(), width, height, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+        return false;
+    }
+    
+    if (width <= 0 || height <= 0) {
+        LOG_ERROR("Test pattern image '%s' has invalid dimensions %dx%d",
+                  imagePath.c_str(), width, height);
+        return false;
+    }
+    
+    // Load the image with 4 channels (RGBA)
     unsigned char* data = stbi_load(imagePath.c_str(), &width, &height, &channels, 4);
     
     if (!data) {
@@ -243,7 +267,7 @@ static void generateProceduralPattern(AppState& state) {
 
 // Initialize V4L2 device
 static bool initV4L2(const char* device, AppState& state) {
-    state.v4l2_fd = open(device, O_RDWR);
+    state.v4l2_fd = open(device, O_RDWR | O_NONBLOCK);
     if (state.v4l2_fd < 0) {
         LOG_ERROR("Failed to open V4L2 device '%s': %s", device, strerror(errno));
         return false;
@@ -332,7 +356,7 @@ static bool queueBuffer(AppState& state, unsigned int index) {
             return true;
         }
         LOG_VERBOSE("QBUF retry %d for buffer %u: %s", retry + 1, index, strerror(errno));
-        usleep(10000); // 10ms delay between retries
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     
     LOG_ERROR("Failed to queue buffer %u after %d retries: %s", 
@@ -383,7 +407,7 @@ static bool restartStream(AppState& state) {
     LOG_INFO("Restarting stream (attempt %d/%d)", state.stream_reset_count, STREAM_RESET_RETRIES);
     
     stopStreaming(state);
-    usleep(100000); // 100ms delay
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     return startStreaming(state);
 }
 
@@ -516,19 +540,25 @@ int main(int argc, char* argv[]) {
         // Continue without V4L2 - will show test pattern
     }
     
-    // Note: OpenGL/EGL initialization would go here
-    // For this implementation, we're focusing on the test pattern loading logic
-    
     // Search for and load test pattern
+    // Note: OpenGL/EGL initialization is required before calling loadTestPatternImage
+    // and generateProceduralPattern. This demo shows the search and fallback logic.
     std::string foundPattern = findTestPatternImage(testPatternPath);
     if (!foundPattern.empty()) {
-        // Note: In a full implementation, this would be called after OpenGL init
-        // loadTestPatternImage(foundPattern, state);
+#ifdef HAVE_EGL
+        if (!loadTestPatternImage(foundPattern, state)) {
+            LOG_ERROR("Failed to load test pattern, falling back to procedural pattern");
+            generateProceduralPattern(state);
+        }
+#else
         LOG_INFO("Test pattern image found: %s", foundPattern.c_str());
-        LOG_INFO("Would load test pattern from: %s", foundPattern.c_str());
+        LOG_INFO("OpenGL not available - would load test pattern from: %s", foundPattern.c_str());
+#endif
     } else {
         LOG_INFO("No test pattern image found, using procedural pattern");
-        // generateProceduralPattern(state);
+#ifdef HAVE_EGL
+        generateProceduralPattern(state);
+#endif
     }
     
     // Start streaming if V4L2 is initialized
