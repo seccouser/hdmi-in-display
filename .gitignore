@@ -1,1 +1,19 @@
-# Ignored files and directories\n*.o\n*.out\n.DS_Store\n
+# Ignored files and directories
+*.o
+*.out
+.DS_Store
+
+# Build directory
+build/
+cmake-build-*/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test images (user-provided)
+testimage.jpg
+test_image.jpg
+testpattern.png
