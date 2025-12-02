@@ -1,1 +1,13 @@
-[Unit]\nDescription=HDMI Display Service\n[Service]\nExecStart=/usr/bin/somecommand\n[Install]\nWantedBy=multi-user.target\n
+[Unit]
+Description=HDMI Simple Display Service
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hdmi_simple_display --test-pattern=/usr/share/hdmi-display/test-pattern.png
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
