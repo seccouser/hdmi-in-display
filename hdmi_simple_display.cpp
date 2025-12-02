@@ -16,6 +16,10 @@ enum class DebugSimpleMode {
 // Global debug mode
 static DebugSimpleMode g_debugSimpleMode = DebugSimpleMode::NONE;
 
+// CLI option prefix constants
+static constexpr const char* DEBUG_SIMPLE_PREFIX = "--debug-simple=";
+static constexpr size_t DEBUG_SIMPLE_PREFIX_LEN = 15;  // strlen("--debug-simple=")
+
 // Print usage information
 void printUsage(const char* programName) {
     printf("Usage: %s [OPTIONS]\n", programName);
@@ -41,8 +45,8 @@ bool parseArgs(int argc, char* argv[]) {
             printUsage(argv[0]);
             return false;
         }
-        if (strncmp(argv[i], "--debug-simple=", 15) == 0) {
-            const char* mode = argv[i] + 15;
+        if (strncmp(argv[i], DEBUG_SIMPLE_PREFIX, DEBUG_SIMPLE_PREFIX_LEN) == 0) {
+            const char* mode = argv[i] + DEBUG_SIMPLE_PREFIX_LEN;
             if (strcmp(mode, "gl_swap") == 0) {
                 g_debugSimpleMode = DebugSimpleMode::GL_SWAP;
                 printf("[DEBUG] Debug mode enabled: gl_swap (solid color test)\n");
@@ -54,6 +58,10 @@ bool parseArgs(int argc, char* argv[]) {
                 fprintf(stderr, "Valid modes are: gl_swap, uv_grid\n");
                 return false;
             }
+        } else {
+            fprintf(stderr, "Error: Unknown argument '%s'\n", argv[i]);
+            fprintf(stderr, "Use --help to see available options.\n");
+            return false;
         }
     }
     return true;
