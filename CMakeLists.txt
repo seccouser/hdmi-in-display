@@ -15,6 +15,7 @@ add_executable(hdmi_simple_display hdmi_simple_display.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(hdmi_simple_display PRIVATE Threads::Threads)
 
-# Install target
-install(TARGETS hdmi_simple_display DESTINATION bin)
-install(FILES service/hdmi-display.service DESTINATION lib/systemd/system)
+# Install target using standard paths
+include(GNUInstallDirs)
+install(TARGETS hdmi_simple_display DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES service/hdmi-display.service DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system)

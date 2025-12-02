@@ -5,7 +5,9 @@ Wants=display-manager.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/hdmi_simple_display --test-pattern=/usr/share/hdmi-display/test-pattern.png
+# Set TEST_PATTERN_PATH to customize the test pattern image
+Environment="TEST_PATTERN_PATH=/usr/share/hdmi-display/test-pattern.png"
+ExecStart=/bin/sh -c 'if [ -f "$TEST_PATTERN_PATH" ]; then exec /usr/bin/hdmi_simple_display --test-pattern="$TEST_PATTERN_PATH"; else exec /usr/bin/hdmi_simple_display; fi'
 Restart=on-failure
 RestartSec=5
 
