@@ -18,7 +18,14 @@ static DebugSimpleMode g_debugSimpleMode = DebugSimpleMode::NONE;
 
 // CLI option prefix constants
 static constexpr const char* DEBUG_SIMPLE_PREFIX = "--debug-simple=";
-static constexpr size_t DEBUG_SIMPLE_PREFIX_LEN = 15;  // strlen("--debug-simple=")
+
+// Helper to calculate string length at compile time
+constexpr size_t constexprStrlen(const char* str) {
+    size_t len = 0;
+    while (str[len] != '\0') ++len;
+    return len;
+}
+static constexpr size_t DEBUG_SIMPLE_PREFIX_LEN = constexprStrlen(DEBUG_SIMPLE_PREFIX);
 
 // Print usage information
 void printUsage(const char* programName) {
@@ -47,6 +54,11 @@ bool parseArgs(int argc, char* argv[]) {
         }
         if (strncmp(argv[i], DEBUG_SIMPLE_PREFIX, DEBUG_SIMPLE_PREFIX_LEN) == 0) {
             const char* mode = argv[i] + DEBUG_SIMPLE_PREFIX_LEN;
+            if (mode[0] == '\0') {
+                fprintf(stderr, "Error: --debug-simple requires a mode value\n");
+                fprintf(stderr, "Valid modes are: gl_swap, uv_grid\n");
+                return false;
+            }
             if (strcmp(mode, "gl_swap") == 0) {
                 g_debugSimpleMode = DebugSimpleMode::GL_SWAP;
                 printf("[DEBUG] Debug mode enabled: gl_swap (solid color test)\n");
