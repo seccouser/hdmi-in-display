@@ -1,3 +1,12 @@
-# Ignored files and directories\n*.o\n*.out\n.DS_Store\n#CMakeLists.txt#
-cmake-build-release/
+# build artifacts
+/build/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/*.o
+*.obj
+*.log
+*.exe
+dist/
 .idea/
+.vscode/
