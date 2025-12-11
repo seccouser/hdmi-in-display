@@ -537,7 +537,16 @@ int main(int argc, char** argv) {
     if (glewInit() != GLEW_OK) { std::cerr << "GLEW init failed!" << std::endl; close(fd); return 1; }
 
     GLint gl_max_tex=0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_max_tex);
-    int win_w=0, win_h=0; SDL_GetWindowSize(win, &win_w, &win_h); glViewport(0,0,win_w,win_h);
+    int win_w = 0, win_h = 0;
+    SDL_DisplayMode dm;
+    if (SDL_GetDesktopDisplayMode(0, &dm) == 0) {
+        win_w = dm.w;
+        win_h = dm.h;
+        SDL_SetWindowSize(win, win_w, win_h);
+    } else {
+        SDL_GetWindowSize(win, &win_w, &win_h);
+    }
+    glViewport(0, 0, win_w, win_h);
 
     std::vector<std::string> attempts; std::string vertPath = findShaderFile("shader.vert.glsl",&attempts);
     if (vertPath.empty()) { std::cerr<<"Vertex shader not found\n"; close(fd); return 1; }
@@ -1148,6 +1157,17 @@ int main(int argc, char** argv) {
       SDL_Event e;
       while (SDL_PollEvent(&e)) {
           if (e.type == SDL_QUIT) { goto shutdown; }
+          if (e.type == SDL_WINDOWEVENT) {
+              if (e.window.event == SDL_WINDOWEVENT_RESIZED || e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                  SDL_GetWindowSize(win, &win_w, &win_h);
+                  glViewport(0, 0, win_w, win_h);
+                  if (loc_u_windowSize >= 0) {
+                      glUseProgram(program);
+                      glUniform2f(loc_u_windowSize, (float)win_w, (float)win_h);
+                      if (loc_u_alignTopLeft >= 0) glUniform1i(loc_u_alignTopLeft, 1);
+                  }
+              }
+          }
           else if (e.type == SDL_KEYDOWN) {
               SDL_Keycode k = e.key.keysym.sym;
               if (k == SDLK_ESCAPE) { goto shutdown; }
